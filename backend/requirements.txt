@@ -1,0 +1,39 @@
+# FastAPI & Server
+fastapi
+uvicorn[standard]
+python-multipart
+websockets
+
+# Database
+sqlalchemy[asyncio]
+aiosqlite
+alembic
+
+# Validation & Settings
+pydantic
+pydantic-settings
+email-validator
+
+# Auth & Security
+python-jose[cryptography]
+passlib[bcrypt]
+cryptography
+
+# Async Task Queue
+celery
+redis
+
+# AWS SDK
+boto3
+
+# LLM Integration
+httpx
+openai
+
+# Testing
+pytest
+pytest-asyncio
+
+# Utilities
+python-dotenv
+structlog

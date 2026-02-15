@@ -1,0 +1,64 @@
+version: "3.9"
+
+services:
+  # ── Backend API ──────────────────────────────────────────
+  backend:
+    build: .
+    container_name: nl2i-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://nl2i:nl2i_password@postgres:5432/nl2i
+      - REDIS_URL=redis://redis:6379/0
+      - TERRAFORM_WORKSPACES_DIR=/app/workspaces
+    volumes:
+      - ./workspaces:/app/workspaces
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+  # ── Celery Worker ────────────────────────────────────────
+  celery-worker:
+    build: .
+    container_name: nl2i-celery
+    command: celery -A app.tasks.celery_app worker --loglevel=info
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://nl2i:nl2i_password@postgres:5432/nl2i
+      - REDIS_URL=redis://redis:6379/0
+      - TERRAFORM_WORKSPACES_DIR=/app/workspaces
+    volumes:
+      - ./workspaces:/app/workspaces
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+  # ── PostgreSQL ───────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: nl2i-postgres
+    environment:
+      POSTGRES_USER: nl2i
+      POSTGRES_PASSWORD: nl2i_password
+      POSTGRES_DB: nl2i
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # ── Redis ────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: nl2i-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
