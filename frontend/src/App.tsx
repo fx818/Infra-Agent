@@ -10,6 +10,7 @@ import { ProjectDetail } from './pages/projects/ProjectDetail';
 import { NewProject } from './pages/projects/NewProject';
 import { Deployments } from './pages/Deployments';
 import { Monitoring } from './pages/Monitoring';
+import { CostAnalysis } from './pages/CostAnalysis';
 import { Settings } from './pages/Settings';
 
 function App() {
@@ -27,6 +28,7 @@ function App() {
               <Route path="/projects/:id" element={<ProjectDetail />} />
               <Route path="/deployments" element={<Deployments />} />
               <Route path="/monitoring" element={<Monitoring />} />
+              <Route path="/cost-analysis" element={<CostAnalysis />} />
               <Route path="/settings" element={<Settings />} />
             </Route>
           </Route>

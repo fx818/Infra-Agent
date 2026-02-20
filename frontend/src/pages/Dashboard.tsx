@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { projectsApi } from '../api/projects';
 import type { Project } from '../types';
-import { Plus, Server, Trash2, Calendar, ArrowRight, Folder, Sparkles } from 'lucide-react';
+import { Plus, Trash2, Calendar, ArrowRight, Folder, Sparkles } from 'lucide-react';
 
 export const Dashboard: React.FC = () => {
     const [projects, setProjects] = useState<Project[]>([]);

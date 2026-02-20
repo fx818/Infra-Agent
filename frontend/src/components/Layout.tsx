@@ -10,7 +10,8 @@ import {
     Activity,
     Menu,
     X,
-    Zap
+    Zap,
+    DollarSign,
 } from 'lucide-react';
 
 export const Layout: React.FC = () => {
@@ -29,6 +30,7 @@ export const Layout: React.FC = () => {
         { label: 'New Project', path: '/projects/new', icon: Plus },
         { label: 'Deployments', path: '/deployments', icon: Server },
         { label: 'Monitoring', path: '/monitoring', icon: Activity },
+        { label: 'Cost Analysis', path: '/cost-analysis', icon: DollarSign },
         { label: 'Settings', path: '/settings', icon: Settings },
     ];
 
