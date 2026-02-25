@@ -55,6 +55,7 @@ from app.api.deployment import router as deployment_router
 from app.api.websocket import router as websocket_router
 from app.api.config import router as config_router
 from app.api.monitoring import router as monitoring_router
+from app.api.cost_analysis import router as cost_analysis_router
 
 app.include_router(auth_router)
 app.include_router(projects_router)
@@ -63,6 +64,7 @@ app.include_router(deployment_router)
 app.include_router(websocket_router)
 app.include_router(config_router)
 app.include_router(monitoring_router)
+app.include_router(cost_analysis_router)
 
 
 @app.get("/", tags=["health"])

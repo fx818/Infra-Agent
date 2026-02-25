@@ -31,6 +31,7 @@ from app.services.ai.cost_agent import CostAgent
 from app.services.ai.edit_agent import EditAgent
 from app.services.ai.intent_agent import IntentAgent
 from app.services.ai.terraform_agent import TerraformAgent
+from app.services.ai.tool_agent import ToolAgent
 from app.services.ai.visual_agent import VisualAgent
 from app.services.terraform.workspace_manager import WorkspaceManager
 from app.utils.validators import sanitize_terraform_files, validate_architecture_graph
@@ -109,41 +110,50 @@ async def generate_architecture(
         # Configure LLM for this user
         llm = _get_llm_provider_for_user(current_user)
 
-        # 1. Intent Agent
-        intent_agent = IntentAgent(llm=llm)
-        intent = await intent_agent.run(payload.natural_language_input)
+        # 1. Tool Agent — uses LLM tool-calling to build architecture + terraform in one step
+        tool_agent = ToolAgent(llm=llm)
+        agent_result = await tool_agent.run(
+            user_prompt=payload.natural_language_input,
+            region=project.region,
+            project_name=project.name,
+        )
 
-        # 2. Architecture Agent
-        arch_agent = ArchitectureAgent(llm=llm)
-        graph = await arch_agent.run(intent)
+        graph = agent_result["graph"]
+        terraform_files = agent_result["terraform"]
 
-        # 3. Validate architecture
+        # 2. Validate architecture
         errors = validate_architecture_graph(graph)
         if errors:
             logger.warning("Architecture validation warnings: %s", errors)
 
-        # 4. Terraform Agent
-        tf_agent = TerraformAgent(llm=llm)
-        terraform_files = await tf_agent.run(graph, region=project.region, project_name=project.name)
-
-        # 5. Sanitize Terraform
+        # 3. Sanitize Terraform
         is_safe, issues = sanitize_terraform_files(terraform_files.files)
         if not is_safe:
             logger.warning("Terraform sanitization issues: %s", issues)
 
-        # 6. Cost Agent
+        # 4. Build a lightweight intent for backwards compat with the DB schema
+        intent = IntentOutput(
+            app_type="tool_generated",
+            scale="medium",
+            latency_requirement="moderate",
+            storage_type="object",
+            realtime=False,
+            constraints=[],
+        )
+
+        # 5. Cost Agent
         cost_agent = CostAgent(llm=llm)
         cost = await cost_agent.run(graph, scale=intent.scale)
 
-        # 7. Visual Agent
+        # 6. Visual Agent
         visual_agent = VisualAgent(llm=llm)
         visual = await visual_agent.run(graph)
 
-        # 8. Write Terraform files to workspace
+        # 7. Write Terraform files to workspace
         workspace_mgr = WorkspaceManager()
         workspace_mgr.write_terraform_files(project_id, terraform_files.files)
 
-        # 9. Get current version
+        # 8. Get current version
         result = await db.execute(
             select(Architecture)
             .where(Architecture.project_id == project_id)
@@ -152,7 +162,7 @@ async def generate_architecture(
         latest = result.scalars().first()
         new_version = (latest.version + 1) if latest else 1
 
-        # 10. Save architecture
+        # 9. Save architecture
         architecture = Architecture(
             project_id=project_id,
             version=new_version,
@@ -174,7 +184,11 @@ async def generate_architecture(
         assistant_msg = ChatMessage(
             project_id=project_id,
             role="assistant",
-            content=f"Generated architecture v{new_version} with {len(graph.nodes)} AWS services.",
+            content=(
+                f"Generated architecture v{new_version} with {len(graph.nodes)} AWS services "
+                f"using {agent_result.get('tool_calls_count', 0)} tool calls.\n\n"
+                f"{agent_result.get('summary', '')}"
+            ),
             architecture_version=new_version,
         )
         db.add_all([user_msg, assistant_msg])
