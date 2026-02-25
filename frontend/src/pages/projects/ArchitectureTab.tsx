@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { architectureApi } from '../../api/architecture';
 import type { ArchitectureResponse } from '../../types';
-import { Send, FileCode, Cpu, Loader2, AlertCircle, Box, Sparkles, Share2, Terminal } from 'lucide-react';
+import { Send, FileCode, Cpu, Loader2, Box, Sparkles, Share2, Terminal } from 'lucide-react';
 import { BlueprintGraph } from '../../components/projects/BlueprintGraph';
+import { ErrorPanel } from '../../components/ErrorPanel';
 
 interface Props {
     projectId: number;
@@ -14,8 +15,10 @@ export const ArchitectureTab: React.FC<Props> = ({ projectId }) => {
     const [loading, setLoading] = useState(false);
     const [generating, setGenerating] = useState(false);
     const [prompt, setPrompt] = useState('');
-    const [error, setError] = useState('');
+    const [error, setError] = useState<any>(null);
+    const [lastPrompt, setLastPrompt] = useState('');
     const [view, setView] = useState<'graph' | 'code'>('graph');
+
 
     useEffect(() => {
         loadData();
@@ -37,17 +40,20 @@ export const ArchitectureTab: React.FC<Props> = ({ projectId }) => {
         }
     };
 
-    const handleGenerate = async (e: React.FormEvent) => {
-        e.preventDefault();
-        if (!prompt.trim()) return;
+    const handleGenerate = async (e?: React.FormEvent, retryPrompt?: string) => {
+        e?.preventDefault();
+        const currentPrompt = retryPrompt || prompt;
+        if (!currentPrompt.trim()) return;
 
-        const currentPrompt = prompt;
         setGenerating(true);
-        setError('');
-        setPrompt('');
+        setError(null);
+        setLastPrompt(currentPrompt);
+        if (!retryPrompt) setPrompt('');
 
         // Optimistically add user message
-        setMessages(prev => [...prev, { role: 'user', content: currentPrompt }]);
+        if (!retryPrompt) {
+            setMessages(prev => [...prev, { role: 'user', content: currentPrompt }]);
+        }
 
         try {
             let data;
@@ -62,11 +68,14 @@ export const ArchitectureTab: React.FC<Props> = ({ projectId }) => {
             const updatedMessages = await architectureApi.getMessages(projectId);
             setMessages(updatedMessages);
         } catch (err: any) {
-            setError(err.response?.data?.detail || 'Failed to generate architecture');
-            // Remove the optimistic message on failure if you want, but often better to keep it
+            setError(err);
         } finally {
             setGenerating(false);
         }
+    };
+
+    const handleRetry = () => {
+        handleGenerate(undefined, lastPrompt);
     };
 
     // Service type color map
@@ -164,11 +173,12 @@ export const ArchitectureTab: React.FC<Props> = ({ projectId }) => {
                     )}
 
                     {error && (
-                        <div className="p-3 bg-destructive/10 text-destructive rounded-lg border border-destructive/20 animate-fade-in">
-                            <div className="flex items-start gap-2">
-                                <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                                <p className="text-xs">{error}</p>
-                            </div>
+                        <div className="animate-fade-in">
+                            <ErrorPanel
+                                error={error}
+                                onDismiss={() => setError(null)}
+                                onRetry={lastPrompt ? handleRetry : undefined}
+                            />
                         </div>
                     )}
                 </div>
@@ -188,10 +198,16 @@ export const ArchitectureTab: React.FC<Props> = ({ projectId }) => {
                             type="submit"
                             disabled={generating || !prompt.trim()}
                             className="btn-gradient px-3 py-2.5 shrink-0"
+                            title={generating ? 'Generating…' : 'Send'}
                         >
                             {generating ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
                         </button>
                     </form>
+                    {generating && (
+                        <p className="text-[10px] text-muted-foreground/40 mt-1.5 text-center">
+                            This may take 20–60 seconds…
+                        </p>
+                    )}
                 </div>
             </div>
 

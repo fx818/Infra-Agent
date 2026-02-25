@@ -11,16 +11,69 @@ import {
     addEdge,
     ReactFlowProvider,
     useReactFlow,
+    MarkerType,
 } from '@xyflow/react';
 import type { Edge, Node, Connection } from '@xyflow/react';
+import dagre from 'dagre';
 import { Maximize2, Minimize2, Share2 } from 'lucide-react';
 import '@xyflow/react/dist/style.css';
 import type { VisualGraph } from '../../types';
+import AwsServiceNode from './AwsServiceNode';
+import { categoryColors } from '../../utils/awsLogos';
 
 interface Props {
     visualData: VisualGraph;
 }
 
+// ── Custom node types ──────────────────────────────────────────────
+const nodeTypes = {
+    awsService: AwsServiceNode,
+};
+
+// ── Dagre auto-layout ──────────────────────────────────────────────
+const NODE_WIDTH = 120;
+const NODE_HEIGHT = 100;
+
+function applyDagreLayout(nodes: Node[], edges: Edge[]): Node[] {
+    const g = new dagre.graphlib.Graph();
+    g.setDefaultEdgeLabel(() => ({}));
+    g.setGraph({
+        rankdir: 'LR',     // left-to-right flow
+        ranksep: 80,        // horizontal gap between ranks
+        nodesep: 40,        // vertical gap between nodes
+        marginx: 40,
+        marginy: 40,
+    });
+
+    nodes.forEach((n) => g.setNode(n.id, { width: NODE_WIDTH, height: NODE_HEIGHT }));
+    edges.forEach((e) => g.setEdge(e.source, e.target));
+
+    dagre.layout(g);
+
+    return nodes.map((n) => {
+        const { x, y } = g.node(n.id);
+        return {
+            ...n,
+            position: {
+                x: x - NODE_WIDTH / 2,
+                y: y - NODE_HEIGHT / 2,
+            },
+        };
+    });
+}
+
+// ── Category legend ────────────────────────────────────────────────
+const LEGEND_CATEGORIES = [
+    { label: 'Compute', color: '#FF9900' },
+    { label: 'Storage', color: '#3F8624' },
+    { label: 'Database', color: '#527FFF' },
+    { label: 'Networking', color: '#8C4FFF' },
+    { label: 'Messaging', color: '#E7157B' },
+    { label: 'Security', color: '#DD344C' },
+    { label: 'Monitoring', color: '#E7157B' },
+];
+
+// ── GraphInner ─────────────────────────────────────────────────────
 const GraphInner: React.FC<{
     nodes: Node[];
     edges: Edge[];
@@ -34,9 +87,18 @@ const GraphInner: React.FC<{
 
     useEffect(() => {
         if (nodes.length > 0) {
-            fitView({ duration: 800 });
+            setTimeout(() => fitView({ duration: 600, padding: 0.15 }), 100);
         }
-    }, [nodes.length, fitView]);
+    }, [nodes.length, fitView, isFullScreen]);
+
+    // Escape key exits fullscreen
+    useEffect(() => {
+        const handleKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape' && isFullScreen) toggleFullScreen();
+        };
+        window.addEventListener('keydown', handleKey);
+        return () => window.removeEventListener('keydown', handleKey);
+    }, [isFullScreen, toggleFullScreen]);
 
     return (
         <ReactFlow
@@ -45,86 +107,175 @@ const GraphInner: React.FC<{
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
+            nodeTypes={nodeTypes}
             fitView
             colorMode="dark"
+            nodesDraggable
+            elementsSelectable
+            minZoom={0.2}
+            maxZoom={2}
+            proOptions={{ hideAttribution: true }}
         >
-            <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#ffffff10" />
-            <Controls showInteractive={false} className="bg-white/5 border-white/10" />
+            <Background
+                variant={BackgroundVariant.Dots}
+                gap={24}
+                size={1.2}
+                color="#ffffff08"
+            />
+            <Controls
+                showInteractive={false}
+                style={{
+                    background: 'rgba(13,17,23,0.8)',
+                    border: '1px solid rgba(255,255,255,0.08)',
+                    borderRadius: '8px',
+                }}
+            />
             <MiniMap
-                style={{ background: '#0d1117', border: '1px solid rgba(255,255,255,0.1)' }}
-                nodeColor="#333"
-                maskColor="rgba(0, 0, 0, 0.3)"
+                style={{
+                    background: '#0d1117',
+                    border: '1px solid rgba(255,255,255,0.08)',
+                    borderRadius: '8px',
+                }}
+                nodeColor={(n) => {
+                    const serviceType = (n.data as { serviceType?: string }).serviceType || '';
+                    const cat = Object.entries(categoryColors).find(([, _]) => {
+                        return serviceType.includes(_.toLowerCase().slice(0, 4));
+                    });
+                    return cat ? cat[1] : '#334155';
+                }}
+                maskColor="rgba(0,0,0,0.35)"
             />
             <Panel position="top-right" className="flex flex-col gap-2">
-                <div className="bg-[#0d1117]/80 backdrop-blur-md border border-white/10 rounded-lg p-2 flex items-center gap-3">
-                    <p className="text-[10px] uppercase tracking-wider text-white/40 font-bold">
-                        AWS Dependency Graph
+                {/* Title + fullscreen button */}
+                <div style={{
+                    background: 'rgba(13,17,23,0.85)',
+                    backdropFilter: 'blur(12px)',
+                    border: '1px solid rgba(255,255,255,0.08)',
+                    borderRadius: '10px',
+                    padding: '8px 12px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '10px',
+                }}>
+                    <p style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'rgba(255,255,255,0.35)', fontWeight: 700 }}>
+                        AWS Architecture
                     </p>
                     <button
                         onClick={toggleFullScreen}
-                        className="p-1.5 rounded-md hover:bg-white/10 text-white/60 hover:text-white transition-colors"
-                        title={isFullScreen ? "Exit Full Screen" : "Full Screen"}
+                        style={{
+                            padding: '4px 6px',
+                            borderRadius: '6px',
+                            background: 'rgba(255,255,255,0.05)',
+                            border: '1px solid rgba(255,255,255,0.1)',
+                            color: 'rgba(255,255,255,0.5)',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                        }}
+                        title={isFullScreen ? 'Exit Full Screen' : 'Full Screen'}
                     >
-                        {isFullScreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                        {isFullScreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
                     </button>
+                </div>
+
+                {/* Legend */}
+                <div style={{
+                    background: 'rgba(13,17,23,0.85)',
+                    backdropFilter: 'blur(12px)',
+                    border: '1px solid rgba(255,255,255,0.08)',
+                    borderRadius: '10px',
+                    padding: '8px 12px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '4px',
+                }}>
+                    <p style={{ fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'rgba(255,255,255,0.25)', fontWeight: 700, marginBottom: '4px' }}>
+                        Categories
+                    </p>
+                    {LEGEND_CATEGORIES.map((cat) => (
+                        <div key={cat.label} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: cat.color, flexShrink: 0 }} />
+                            <span style={{ fontSize: '10px', color: 'rgba(255,255,255,0.5)', fontWeight: 500 }}>{cat.label}</span>
+                        </div>
+                    ))}
                 </div>
             </Panel>
         </ReactFlow>
     );
 };
 
+// ── Main export ────────────────────────────────────────────────────
 export const BlueprintGraph: React.FC<Props> = ({ visualData }) => {
     const [isFullScreen, setIsFullScreen] = useState(false);
 
-    const initialNodes: Node[] = useMemo(() => {
+    const rawNodes: Node[] = useMemo(() => {
         if (!visualData?.nodes) return [];
         return visualData.nodes.map((node) => ({
             id: node.id,
+            type: 'awsService',
             position: node.position || { x: 0, y: 0 },
             data: {
                 label: node.data?.label || node.id,
-                serviceType: node.data?.service_type || 'unknown',
-            },
-            style: {
-                ...(node.style || {}),
-                fontSize: '10px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                textAlign: 'center',
+                serviceType: node.data?.service_type || '',
             },
         }));
     }, [visualData?.nodes]);
 
-    const initialEdges: Edge[] = useMemo(() => {
+    const rawEdges: Edge[] = useMemo(() => {
         if (!visualData?.edges) return [];
         return visualData.edges.map((edge) => ({
             id: edge.id,
             source: edge.source,
             target: edge.target,
             label: edge.label,
-            animated: edge.animated,
-            style: edge.style || {},
-            labelStyle: { fill: '#888', fontSize: '8px', fontWeight: 600 },
+            animated: edge.animated ?? true,
+            type: 'smoothstep',
+            style: {
+                stroke: 'rgba(255,255,255,0.18)',
+                strokeWidth: 1.5,
+                ...(edge.style || {}),
+            },
+            markerEnd: {
+                type: MarkerType.ArrowClosed,
+                color: 'rgba(255,255,255,0.3)',
+                width: 16,
+                height: 16,
+            },
+            labelStyle: {
+                fill: 'rgba(255,255,255,0.4)',
+                fontSize: '9px',
+                fontWeight: 600,
+            },
+            labelBgStyle: {
+                fill: 'rgba(13,17,23,0.8)',
+                stroke: 'rgba(255,255,255,0.06)',
+                strokeWidth: 1,
+                rx: 4,
+                ry: 4,
+            },
         }));
     }, [visualData?.edges]);
 
-    const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
-    const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
+    // Apply dagre layout to the raw nodes (ignoring any LLM-provided positions)
+    const layoutedNodes = useMemo(() => {
+        if (rawNodes.length === 0) return [];
+        return applyDagreLayout(rawNodes, rawEdges);
+    }, [rawNodes, rawEdges]);
+
+    const [nodes, setNodes, onNodesChange] = useNodesState(layoutedNodes);
+    const [edges, setEdges, onEdgesChange] = useEdgesState(rawEdges);
 
     useEffect(() => {
-        setNodes(initialNodes);
-        setEdges(initialEdges);
-    }, [initialNodes, initialEdges, setNodes, setEdges]);
+        setNodes(layoutedNodes);
+        setEdges(rawEdges);
+    }, [layoutedNodes, rawEdges, setNodes, setEdges]);
 
     const onConnect = useCallback(
         (params: Connection) => setEdges((eds) => addEdge(params, eds)),
         [setEdges]
     );
 
-    const toggleFullScreen = () => {
-        setIsFullScreen(!isFullScreen);
-    };
+    const toggleFullScreen = () => setIsFullScreen(!isFullScreen);
 
     const graphContent = (
         <ReactFlowProvider>
@@ -142,28 +293,46 @@ export const BlueprintGraph: React.FC<Props> = ({ visualData }) => {
 
     if (isFullScreen) {
         return (
-            <div className="fixed inset-0 z-[9999] bg-[#0d1117] flex flex-col">
-                <div className="p-4 border-b border-white/5 flex justify-between items-center bg-[#0d1117]/50 backdrop-blur-xl">
-                    <div className="flex items-center gap-3">
-                        <div className="p-2 rounded-lg bg-primary/10">
-                            <Share2 size={18} className="text-primary" />
+            <div style={{ position: 'fixed', inset: 0, zIndex: 9999, background: '#0d1117', display: 'flex', flexDirection: 'column' }}>
+                <div style={{
+                    padding: '12px 20px',
+                    borderBottom: '1px solid rgba(255,255,255,0.05)',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    background: 'rgba(13,17,23,0.6)',
+                    backdropFilter: 'blur(20px)',
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                        <div style={{ padding: '6px', borderRadius: '8px', background: 'rgba(99,102,241,0.15)', display: 'flex' }}>
+                            <Share2 size={16} color="#6366f1" />
                         </div>
                         <div>
-                            <h2 className="text-sm font-bold text-white">Full Screen Blueprint</h2>
-                            <p className="text-[11px] text-white/40">AWS Infrastructure Dependency Graph</p>
+                            <h2 style={{ fontSize: '13px', fontWeight: 700, color: '#f1f5f9', margin: 0 }}>Full Screen Blueprint</h2>
+                            <p style={{ fontSize: '11px', color: 'rgba(255,255,255,0.3)', margin: 0 }}>AWS Infrastructure Architecture</p>
                         </div>
                     </div>
                     <button
                         onClick={toggleFullScreen}
-                        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-white/80 transition-all"
+                        style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            padding: '6px 14px',
+                            borderRadius: '8px',
+                            background: 'rgba(255,255,255,0.05)',
+                            border: '1px solid rgba(255,255,255,0.1)',
+                            color: 'rgba(255,255,255,0.7)',
+                            fontSize: '12px',
+                            fontWeight: 600,
+                            cursor: 'pointer',
+                        }}
                     >
-                        <Minimize2 size={14} />
+                        <Minimize2 size={13} />
                         <span>Exit Full Screen</span>
                     </button>
                 </div>
-                <div className="flex-1">
-                    {graphContent}
-                </div>
+                <div style={{ flex: 1 }}>{graphContent}</div>
             </div>
         );
     }

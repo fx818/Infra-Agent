@@ -19,6 +19,7 @@ class Project(Base):
     status: Mapped[str] = mapped_column(String(50), default="created")  # created, generating, ready, deploying, deployed, failed
     region: Mapped[str] = mapped_column(String(50), default="us-east-1")
     natural_language_input: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str] = mapped_column(String(50), default="ai_generated")  # ai_generated | drag_built
 
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

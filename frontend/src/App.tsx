@@ -11,6 +11,9 @@ import { NewProject } from './pages/projects/NewProject';
 import { Deployments } from './pages/Deployments';
 import { Monitoring } from './pages/Monitoring';
 import { Settings } from './pages/Settings';
+import { LogsPage } from './pages/Logs';
+import { DragBuild } from './pages/DragBuild';
+import { CostAnalysis } from './pages/CostAnalysis';
 
 function App() {
   return (
@@ -28,6 +31,9 @@ function App() {
               <Route path="/deployments" element={<Deployments />} />
               <Route path="/monitoring" element={<Monitoring />} />
               <Route path="/settings" element={<Settings />} />
+              <Route path="/logs" element={<LogsPage />} />
+              <Route path="/drag-build" element={<DragBuild />} />
+              <Route path="/cost-analysis" element={<CostAnalysis />} />
             </Route>
           </Route>
 

@@ -13,6 +13,7 @@ class ProjectCreate(BaseModel):
     description: str | None = None
     region: str = "us-east-1"
     natural_language_input: str | None = None
+    source: str = "ai_generated"
 
 
 class ProjectResponse(BaseModel):
@@ -23,6 +24,7 @@ class ProjectResponse(BaseModel):
     status: str
     region: str
     natural_language_input: str | None = None
+    source: str = "ai_generated"
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

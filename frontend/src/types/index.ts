@@ -34,6 +34,7 @@ export interface ProjectResponse {
     status: string;
     region: string;
     natural_language_input?: string;
+    source?: string;
     created_at?: string;
     updated_at?: string;
 }
@@ -45,6 +46,7 @@ export interface ProjectCreate {
     description?: string;
     region?: string;
     natural_language_input?: string;
+    source?: string;
 }
 
 export interface IntentOutput {
@@ -143,4 +145,59 @@ export interface DeploymentResponse {
     started_at?: string;
     completed_at?: string;
     created_at?: string;
+}
+
+// ── Cost Analysis Types ──────────────────────────────────────────
+
+export interface CostQueryRequest {
+    start_date: string;
+    end_date: string;
+    granularity?: string;
+    group_by?: string;
+    filter_service?: string;
+}
+
+export interface CostForecastRequest {
+    start_date: string;
+    end_date: string;
+    granularity?: string;
+}
+
+export interface CostDataPoint {
+    date: string;
+    amount: number;
+    unit: string;
+    group: string;
+}
+
+export interface CostSummary {
+    total_cost: number;
+    currency: string;
+    start_date: string;
+    end_date: string;
+    granularity: string;
+    data_points: CostDataPoint[];
+    group_totals: Record<string, number>;
+}
+
+export interface CostForecast {
+    total_forecasted: number;
+    currency: string;
+    start_date: string;
+    end_date: string;
+    data_points: CostDataPoint[];
+}
+
+export interface CostRecommendation {
+    service: string;
+    recommendation: string;
+    estimated_savings: number;
+    priority: string;
+}
+
+export interface CostAnalysisResponse {
+    summary: CostSummary | null;
+    forecast: CostForecast | null;
+    recommendations: CostRecommendation[];
+    generated_at: string;
 }

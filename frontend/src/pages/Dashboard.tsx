@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { projectsApi } from '../api/projects';
 import type { Project } from '../types';
-import { Plus, Server, Trash2, Calendar, ArrowRight, Folder, Sparkles } from 'lucide-react';
+import { Plus, Trash2, Calendar, ArrowRight, Folder, Sparkles, Bot, Blocks } from 'lucide-react';
 
 export const Dashboard: React.FC = () => {
     const [projects, setProjects] = useState<Project[]>([]);
@@ -93,7 +93,10 @@ export const Dashboard: React.FC = () => {
                             style={{ animationDelay: `${index * 80}ms`, opacity: 0 }}
                         >
                             {/* Gradient accent strip */}
-                            <div className="h-1 w-full bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 opacity-60" />
+                            <div className={`h-1 w-full ${project.source === 'drag_built'
+                                ? 'bg-gradient-to-r from-violet-500 via-fuchsia-500 to-pink-500'
+                                : 'bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500'
+                                } opacity-60`} />
 
                             <div className="p-5">
                                 <div className="flex items-start justify-between mb-4">
@@ -101,11 +104,30 @@ export const Dashboard: React.FC = () => {
                                         <Folder size={20} className="text-primary" />
                                     </div>
                                     <span className={`px-2.5 py-1 rounded-full text-[11px] font-semibold ${project.status === 'deployed'
-                                            ? 'badge-success'
-                                            : 'badge-warning'
+                                        ? 'badge-success'
+                                        : 'badge-warning'
                                         }`}>
                                         {project.status}
                                     </span>
+                                </div>
+
+                                {/* Source badge */}
+                                <div style={{
+                                    display: 'flex', alignItems: 'center', gap: '4px',
+                                    padding: '2px 8px', borderRadius: '12px',
+                                    fontSize: '10px', fontWeight: 600,
+                                    background: project.source === 'drag_built'
+                                        ? 'rgba(139,92,246,0.12)'
+                                        : 'rgba(59,130,246,0.12)',
+                                    border: `1px solid ${project.source === 'drag_built'
+                                        ? 'rgba(139,92,246,0.25)'
+                                        : 'rgba(59,130,246,0.25)'}`,
+                                    color: project.source === 'drag_built' ? '#a78bfa' : '#60a5fa',
+                                }}>
+                                    {project.source === 'drag_built'
+                                        ? <><Blocks size={10} /> Drag Built</>
+                                        : <><Bot size={10} /> AI Generated</>
+                                    }
                                 </div>
 
                                 <h3 className="text-base font-semibold mb-1.5 group-hover:text-primary transition-colors">
@@ -134,7 +156,8 @@ export const Dashboard: React.FC = () => {
                         </Link>
                     ))}
                 </div>
-            )}
-        </div>
+            )
+            }
+        </div >
     );
 };

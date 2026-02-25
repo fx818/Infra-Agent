@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app.core.config import settings
 from app.db.base import Base
@@ -25,6 +26,16 @@ async def lifespan(app: FastAPI):
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+        # ── Migrations (safe to re-run) ──────────────────────────────
+
+        # Add 'source' column to projects table if it doesn't exist
+        try:
+            await conn.execute(
+                text("ALTER TABLE projects ADD COLUMN source VARCHAR(50) DEFAULT 'ai_generated'")
+            )
+        except Exception:
+            pass  # Column already exists
 
     yield
 
@@ -47,6 +58,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Request/Response CSV Logger ──────────────────────────────────
+from app.middleware.request_logger import RequestLoggerMiddleware  # noqa: E402
+app.add_middleware(RequestLoggerMiddleware)
+
+
 # ── Register API Routers ────────────────────────────────────────
 from app.api.auth import router as auth_router
 from app.api.projects import router as projects_router
@@ -56,6 +72,8 @@ from app.api.websocket import router as websocket_router
 from app.api.config import router as config_router
 from app.api.monitoring import router as monitoring_router
 from app.api.cost_analysis import router as cost_analysis_router
+from app.api.logs import router as logs_router
+from app.api.drag_build import router as drag_build_router
 
 app.include_router(auth_router)
 app.include_router(projects_router)
@@ -65,6 +83,8 @@ app.include_router(websocket_router)
 app.include_router(config_router)
 app.include_router(monitoring_router)
 app.include_router(cost_analysis_router)
+app.include_router(logs_router)
+app.include_router(drag_build_router)
 
 
 @app.get("/", tags=["health"])

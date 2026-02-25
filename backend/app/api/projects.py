@@ -29,6 +29,7 @@ async def create_project(
         description=payload.description,
         region=payload.region,
         natural_language_input=payload.natural_language_input,
+        source=payload.source,
     )
     db.add(project)
     await db.commit()
