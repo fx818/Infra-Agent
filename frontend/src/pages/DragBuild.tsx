@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useCallback, useRef, useMemo, useEffect } from 'react';
 import {
     ReactFlow,
     Background,
@@ -18,11 +18,12 @@ import {
     Search, Save, Blocks, ChevronDown, ChevronRight,
     GripVertical, Loader2, Undo2,
 } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { getAwsLogo } from '../utils/awsLogos';
 import {
     CATEGORY_COLORS,
     getServicesByCategory,
+    AWS_SERVICE_CATALOG,
 } from '../utils/awsServiceCatalog';
 import type { AwsServiceDef } from '../utils/awsServiceCatalog';
 import { isConnectionAllowed, getConnectionLabel } from '../utils/awsConnections';
@@ -52,6 +53,10 @@ const DragBuildInner: React.FC = () => {
     const [search, setSearch] = useState('');
     const [collapsedCats, setCollapsedCats] = useState<Set<string>>(new Set());
 
+    const [searchParams] = useSearchParams();
+    const editingProjectId = searchParams.get('projectId');
+    const [loadingProject, setLoadingProject] = useState(false);
+
     // ── Service catalog filtering ──────────────────────────────────
     const servicesByCategory = useMemo(() => getServicesByCategory(), []);
     const filteredServices = useMemo(() => {
@@ -68,6 +73,66 @@ const DragBuildInner: React.FC = () => {
         }
         return filtered;
     }, [search, servicesByCategory]);
+
+    // ── Load existing project ──────────────────────────────────────
+    useEffect(() => {
+        const loadProject = async () => {
+            if (!editingProjectId) return;
+            setLoadingProject(true);
+            try {
+                const [projectRes, archRes] = await Promise.all([
+                    api.get(`/projects/${editingProjectId}`),
+                    api.get(`/projects/${editingProjectId}/architecture`),
+                ]);
+
+                const project = projectRes.data;
+                const architecture = archRes.data;
+
+                setProjectName(project.name);
+                setProjectDesc(project.description || '');
+
+                if (architecture.visual && architecture.visual.nodes) {
+                    const mappedNodes: Node[] = architecture.visual.nodes.map((n: any) => ({
+                        id: n.id,
+                        type: 'dragBuildNode',
+                        position: n.position,
+                        data: {
+                            label: n.data.label,
+                            serviceType: n.data.service_type,
+                            serviceDef: AWS_SERVICE_CATALOG.find((s: AwsServiceDef) => s.id === n.data.service_type),
+                            onDelete: (id: string) => setNodes(ns => ns.filter(node => node.id !== id)),
+                        },
+                    }));
+                    setNodes(mappedNodes);
+
+                    if (architecture.visual.edges) {
+                        const mappedEdges: Edge[] = architecture.visual.edges.map((e: any) => ({
+                            id: e.id,
+                            source: e.source,
+                            target: e.target,
+                            label: e.label,
+                            animated: true,
+                            type: 'smoothstep',
+                            style: { stroke: 'rgba(255,255,255,0.25)', strokeWidth: 1.5 },
+                            markerEnd: {
+                                type: MarkerType.ArrowClosed,
+                                color: 'rgba(255,255,255,0.4)',
+                                width: 16,
+                                height: 16,
+                            },
+                        }));
+                        setEdges(mappedEdges);
+                    }
+                }
+            } catch (err) {
+                console.error('Failed to load project for editing:', err);
+            } finally {
+                setLoadingProject(false);
+            }
+        };
+
+        loadProject();
+    }, [editingProjectId, setNodes, setEdges]);
 
     // ── Drag and drop ──────────────────────────────────────────────
     const onDragStart = (e: React.DragEvent, service: AwsServiceDef) => {
@@ -188,14 +253,23 @@ const DragBuildInner: React.FC = () => {
                     id: e.id,
                     source: e.source,
                     target: e.target,
-                    label: (e.label as string) || '',
+                    label: e.label || '',
                 })),
             };
-            const res = await api.post('/drag-build/save', payload);
-            navigate(`/projects/${res.data.id}`);
+
+            let response;
+            if (editingProjectId) {
+                // Update existing project
+                response = await api.put(`/projects/${editingProjectId}`, payload);
+            } else {
+                // Create new project
+                response = await api.post('/drag-build/save', payload);
+            }
+
+            const project = response.data;
+            navigate(`/projects/${project.id || editingProjectId}`);
         } catch (err) {
-            console.error('Failed to save drag build:', err);
-        } finally {
+            console.error('Failed to save project:', err);
             setSaving(false);
         }
     };
@@ -449,10 +523,22 @@ const DragBuildInner: React.FC = () => {
                             }}
                         >
                             {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
-                            {saving ? 'Saving…' : 'Save Project'}
+                            {saving ? (editingProjectId ? 'Updating…' : 'Saving…') : (editingProjectId ? 'Update Project' : 'Save Project')}
                         </button>
                     </div>
                 </div>
+
+                {/* Loading overlay */}
+                {loadingProject && (
+                    <div style={{
+                        position: 'absolute', inset: 0, zIndex: 1000,
+                        background: 'rgba(13,17,23,0.8)', backdropFilter: 'blur(4px)',
+                        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '12px',
+                    }}>
+                        <Loader2 size={32} className="animate-spin text-primary" />
+                        <p style={{ color: '#f1f5f9', fontSize: '14px', fontWeight: 600 }}>Loading project architecture…</p>
+                    </div>
+                )}
 
                 {/* ReactFlow canvas */}
                 <div

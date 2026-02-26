@@ -98,13 +98,15 @@ class RequestLoggerMiddleware(BaseHTTPMiddleware):
     """
 
     SKIP_PATHS = {"/docs", "/openapi.json", "/redoc", "/favicon.ico", "/"}
+    SKIP_PREFIXES = {"/logs"}
 
     def __init__(self, app: ASGIApp) -> None:
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        # Skip logging for health/docs endpoints
-        if request.url.path in self.SKIP_PATHS:
+        # Skip logging for health/docs/logs endpoints
+        path = request.url.path
+        if path in self.SKIP_PATHS or any(path.startswith(p) for p in self.SKIP_PREFIXES):
             return await call_next(request)
 
         start_time = time.perf_counter()

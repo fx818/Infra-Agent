@@ -10,7 +10,8 @@ import {
     Layers,
     Server,
     Activity,
-    Circle
+    Circle,
+    Edit3
 } from 'lucide-react';
 
 export const ProjectDetail: React.FC = () => {
@@ -79,8 +80,8 @@ export const ProjectDetail: React.FC = () => {
                     <div className="flex items-center gap-3">
                         <h1 className="text-xl font-bold truncate">{project.name}</h1>
                         <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-semibold shrink-0 ${project.status === 'deployed'
-                                ? 'badge-success'
-                                : 'badge-warning'
+                            ? 'badge-success'
+                            : 'badge-warning'
                             }`}>
                             {project.status.toUpperCase()}
                         </span>
@@ -89,6 +90,15 @@ export const ProjectDetail: React.FC = () => {
                         <p className="text-xs text-muted-foreground/60 truncate mt-0.5">{project.description}</p>
                     )}
                 </div>
+
+                {/* Edit in Canvas Button */}
+                <Link
+                    to={`/drag-build?projectId=${id}`}
+                    className="flex items-center gap-2 px-4 py-2 rounded-xl bg-primary/10 text-primary hover:bg-primary/20 transition-all border border-primary/20 text-xs font-semibold"
+                >
+                    <Edit3 size={14} />
+                    <span>Edit in Canvas</span>
+                </Link>
             </div>
 
             {/* Tabs */}
@@ -101,8 +111,8 @@ export const ProjectDetail: React.FC = () => {
                             key={tab.key}
                             onClick={() => setActiveTab(tab.key)}
                             className={`relative flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium transition-all duration-200 ${isActive
-                                    ? 'bg-primary/10 text-primary shadow-sm'
-                                    : 'text-muted-foreground hover:text-foreground hover:bg-white/[0.04]'
+                                ? 'bg-primary/10 text-primary shadow-sm'
+                                : 'text-muted-foreground hover:text-foreground hover:bg-white/[0.04]'
                                 }`}
                         >
                             <Icon size={14} />

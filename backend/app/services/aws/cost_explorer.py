@@ -185,7 +185,17 @@ class CostExplorerService:
             logger.warning("Rightsizing API error: %s", e)
 
         if not recommendations:
-            recommendations = self._fallback_recommendations()
+            if not client:
+                recommendations = self._fallback_recommendations()
+            else:
+                recommendations = [
+                    CostRecommendation(
+                        service="General",
+                        recommendation="Your architecture is optimized! No cost optimization opportunities found at this time.",
+                        estimated_savings=0.0,
+                        priority="low",
+                    )
+                ]
 
         return recommendations
 

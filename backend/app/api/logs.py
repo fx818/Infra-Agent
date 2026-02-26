@@ -33,6 +33,7 @@ def _parse_csv_file(path: Path) -> list[dict[str, Any]]:
         for i, row in enumerate(reader):
             row["_id"] = i  # stable row index for frontend keying
             rows.append(dict(row))
+        rows.reverse()
     except Exception:
         pass
     return rows

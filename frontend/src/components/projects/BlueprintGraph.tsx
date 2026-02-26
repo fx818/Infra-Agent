@@ -73,6 +73,8 @@ const LEGEND_CATEGORIES = [
     { label: 'Monitoring', color: '#E7157B' },
 ];
 
+import { createPortal } from 'react-dom';
+
 // ── GraphInner ─────────────────────────────────────────────────────
 const GraphInner: React.FC<{
     nodes: Node[];
@@ -85,9 +87,14 @@ const GraphInner: React.FC<{
 }> = ({ nodes, edges, onNodesChange, onEdgesChange, onConnect, isFullScreen, toggleFullScreen }) => {
     const { fitView } = useReactFlow();
 
+    // Re-fire fitView when nodes or fullscreen state changes
     useEffect(() => {
         if (nodes.length > 0) {
-            setTimeout(() => fitView({ duration: 600, padding: 0.15 }), 100);
+            // Short delay to ensure the container has settled after portal move
+            const timer = setTimeout(() => {
+                fitView({ duration: 400, padding: 0.15 });
+            }, 50);
+            return () => clearTimeout(timer);
         }
     }, [nodes.length, fitView, isFullScreen]);
 
@@ -112,7 +119,7 @@ const GraphInner: React.FC<{
             colorMode="dark"
             nodesDraggable
             elementsSelectable
-            minZoom={0.2}
+            minZoom={0.1}
             maxZoom={2}
             proOptions={{ hideAttribution: true }}
         >
@@ -146,7 +153,6 @@ const GraphInner: React.FC<{
                 maskColor="rgba(0,0,0,0.35)"
             />
             <Panel position="top-right" className="flex flex-col gap-2">
-                {/* Title + fullscreen button */}
                 <div style={{
                     background: 'rgba(13,17,23,0.85)',
                     backdropFilter: 'blur(12px)',
@@ -178,7 +184,6 @@ const GraphInner: React.FC<{
                     </button>
                 </div>
 
-                {/* Legend */}
                 <div style={{
                     background: 'rgba(13,17,23,0.85)',
                     backdropFilter: 'blur(12px)',
@@ -256,7 +261,6 @@ export const BlueprintGraph: React.FC<Props> = ({ visualData }) => {
         }));
     }, [visualData?.edges]);
 
-    // Apply dagre layout to the raw nodes (ignoring any LLM-provided positions)
     const layoutedNodes = useMemo(() => {
         if (rawNodes.length === 0) return [];
         return applyDagreLayout(rawNodes, rawEdges);
@@ -291,55 +295,62 @@ export const BlueprintGraph: React.FC<Props> = ({ visualData }) => {
         </ReactFlowProvider>
     );
 
-    if (isFullScreen) {
-        return (
-            <div style={{ position: 'fixed', inset: 0, zIndex: 9999, background: '#0d1117', display: 'flex', flexDirection: 'column' }}>
-                <div style={{
-                    padding: '12px 20px',
-                    borderBottom: '1px solid rgba(255,255,255,0.05)',
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    background: 'rgba(13,17,23,0.6)',
-                    backdropFilter: 'blur(20px)',
-                }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                        <div style={{ padding: '6px', borderRadius: '8px', background: 'rgba(99,102,241,0.15)', display: 'flex' }}>
-                            <Share2 size={16} color="#6366f1" />
-                        </div>
-                        <div>
-                            <h2 style={{ fontSize: '13px', fontWeight: 700, color: '#f1f5f9', margin: 0 }}>Full Screen Blueprint</h2>
-                            <p style={{ fontSize: '11px', color: 'rgba(255,255,255,0.3)', margin: 0 }}>AWS Infrastructure Architecture</p>
-                        </div>
+    const fullScreenContent = isFullScreen ? createPortal(
+        <div style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 99999,
+            background: '#0d1117',
+            display: 'flex',
+            flexDirection: 'column',
+        }}>
+            <div style={{
+                padding: '12px 20px',
+                borderBottom: '1px solid rgba(255,255,255,0.05)',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                background: 'rgba(13,17,23,0.6)',
+                backdropFilter: 'blur(20px)',
+            }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <div style={{ padding: '6px', borderRadius: '8px', background: 'rgba(99,102,241,0.15)', display: 'flex' }}>
+                        <Share2 size={16} color="#6366f1" />
                     </div>
-                    <button
-                        onClick={toggleFullScreen}
-                        style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '6px',
-                            padding: '6px 14px',
-                            borderRadius: '8px',
-                            background: 'rgba(255,255,255,0.05)',
-                            border: '1px solid rgba(255,255,255,0.1)',
-                            color: 'rgba(255,255,255,0.7)',
-                            fontSize: '12px',
-                            fontWeight: 600,
-                            cursor: 'pointer',
-                        }}
-                    >
-                        <Minimize2 size={13} />
-                        <span>Exit Full Screen</span>
-                    </button>
+                    <div>
+                        <h2 style={{ fontSize: '13px', fontWeight: 700, color: '#f1f5f9', margin: 0 }}>Full Screen Blueprint</h2>
+                        <p style={{ fontSize: '11px', color: 'rgba(255,255,255,0.3)', margin: 0 }}>AWS Infrastructure Architecture</p>
+                    </div>
                 </div>
-                <div style={{ flex: 1 }}>{graphContent}</div>
+                <button
+                    onClick={toggleFullScreen}
+                    style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        padding: '6px 14px',
+                        borderRadius: '8px',
+                        background: 'rgba(255,255,255,0.05)',
+                        border: '1px solid rgba(255,255,255,0.1)',
+                        color: 'rgba(255,255,255,0.7)',
+                        fontSize: '12px',
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                    }}
+                >
+                    <Minimize2 size={13} />
+                    <span>Exit Full Screen</span>
+                </button>
             </div>
-        );
-    }
+            <div style={{ flex: 1, position: 'relative' }}>{graphContent}</div>
+        </div>,
+        document.body
+    ) : null;
 
     return (
         <div style={{ width: '100%', height: '100%', background: '#0d1117', position: 'relative' }}>
             {graphContent}
+            {fullScreenContent}
         </div>
     );
 };
