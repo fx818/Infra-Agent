@@ -323,15 +323,14 @@ See [`backend/.env.example`](backend/.env.example) for the full configuration te
 
 
 ## MVP
-
-<img width="1919" height="972" alt="Screenshot 2026-02-26 134131" src="https://github.com/user-attachments/assets/67a74b3d-880f-4f0b-8910-a83e600ac93e" />
-<img width="1919" height="970" alt="Screenshot 2026-02-26 134123" src="https://github.com/user-attachments/assets/ced36dee-bf33-40fe-af94-542567339b26" />
-<img width="1919" height="969" alt="Screenshot 2026-02-26 134113" src="https://github.com/user-attachments/assets/23f30f3f-b233-4eec-8a7e-bf90cc261f67" />
-<img width="1919" height="970" alt="Screenshot 2026-02-26 134056" src="https://github.com/user-attachments/assets/6a32fa12-35bd-4fdf-94e9-f301309d131f" />
-<img width="1919" height="971" alt="Screenshot 2026-02-26 134041" src="https://github.com/user-attachments/assets/aeecf5a4-9bd0-4f04-840f-cecf2f1c6a81" />
-<img width="1919" height="967" alt="Screenshot 2026-02-26 134034" src="https://github.com/user-attachments/assets/bd542dca-9941-4444-a2b8-b46516e630f5" />
-<img width="1918" height="969" alt="Screenshot 2026-02-26 134028" src="https://github.com/user-attachments/assets/72f534e3-1867-4b11-bafd-0965b8bafe76" />
 <img width="1919" height="969" alt="Screenshot 2026-02-26 134019" src="https://github.com/user-attachments/assets/ea1acddd-fd7c-43d4-a49a-93ea9a76cd74" />
+<img width="1918" height="969" alt="Screenshot 2026-02-26 134028" src="https://github.com/user-attachments/assets/72f534e3-1867-4b11-bafd-0965b8bafe76" />
+<img width="1919" height="967" alt="Screenshot 2026-02-26 134034" src="https://github.com/user-attachments/assets/bd542dca-9941-4444-a2b8-b46516e630f5" />
+<img width="1919" height="971" alt="Screenshot 2026-02-26 134041" src="https://github.com/user-attachments/assets/aeecf5a4-9bd0-4f04-840f-cecf2f1c6a81" />
+<img width="1919" height="970" alt="Screenshot 2026-02-26 134056" src="https://github.com/user-attachments/assets/6a32fa12-35bd-4fdf-94e9-f301309d131f" />
+<img width="1919" height="969" alt="Screenshot 2026-02-26 134113" src="https://github.com/user-attachments/assets/23f30f3f-b233-4eec-8a7e-bf90cc261f67" />
+<img width="1919" height="970" alt="Screenshot 2026-02-26 134123" src="https://github.com/user-attachments/assets/ced36dee-bf33-40fe-af94-542567339b26" />
+<img width="1919" height="972" alt="Screenshot 2026-02-26 134131" src="https://github.com/user-attachments/assets/67a74b3d-880f-4f0b-8910-a83e600ac93e" />
 
 
 ---
