@@ -204,4 +204,16 @@ variable "project_name" {{
   type    = string
   default = "{project_name}"
 }}
+
+variable "db_password" {{
+  type      = string
+  sensitive = true
+  default   = "ChangeMe123!"
+  description = "Master password for database resources. Change this before applying in production."
+}}
+
+variable "environment" {{
+  type    = string
+  default = "dev"
+}}
 '''

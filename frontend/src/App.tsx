@@ -14,6 +14,7 @@ import { Settings } from './pages/Settings';
 import { LogsPage } from './pages/Logs';
 import { DragBuild } from './pages/DragBuild';
 import { CostAnalysis } from './pages/CostAnalysis';
+import { AWSExplorer } from './pages/AWSExplorer';
 
 function App() {
   return (
@@ -34,6 +35,7 @@ function App() {
               <Route path="/logs" element={<LogsPage />} />
               <Route path="/drag-build" element={<DragBuild />} />
               <Route path="/cost-analysis" element={<CostAnalysis />} />
+              <Route path="/aws-explorer" element={<AWSExplorer />} />
             </Route>
           </Route>
 

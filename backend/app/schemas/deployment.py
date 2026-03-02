@@ -21,8 +21,10 @@ class DeploymentResponse(BaseModel):
     status: str
     logs: str | None = None
     error_message: str | None = None
+    error_details: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     created_at: datetime | None = None
 
     model_config = {"from_attributes": True}
+

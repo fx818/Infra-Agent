@@ -20,29 +20,78 @@ class CreateAuroraClusterTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         cid = params["cluster_id"]
-        engine = params.get("engine", "aurora-postgresql")
+        safe_cid = cid.lower().replace("_", "-")
+        raw_engine = params.get("engine", "aurora-postgresql")
+        inst_class = params.get("instance_class", "db.r5.large")
         inst_count = params.get("instances", 2)
-        tf_code = f'''resource "aws_rds_cluster" "{cid}" {{
-  cluster_identifier  = "${{var.project_name}}-{cid}"
+
+        # Auto-correct engine: LLM sometimes passes 'postgres' or 'mysql' directly
+        engine_map = {
+            "postgres": "aurora-postgresql",
+            "postgresql": "aurora-postgresql",
+            "mysql": "aurora-mysql",
+        }
+        engine = engine_map.get(raw_engine.lower(), raw_engine)
+        if engine not in ("aurora-mysql", "aurora-postgresql"):
+            engine = "aurora-postgresql"  # safe default
+
+        tf_code = f'''# --- Networking for Aurora (dedicated subnets in separate VPC) ---
+data "aws_availability_zones" "aurora_azs" {{
+  state = "available"
+}}
+
+resource "aws_vpc" "{cid}_vpc" {{
+  cidr_block           = "10.200.0.0/16"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+  tags = {{ Name = join("-", [var.project_name, "{safe_cid}", "vpc"]) }}
+}}
+
+resource "aws_subnet" "{cid}_subnet_a" {{
+  vpc_id            = aws_vpc.{cid}_vpc.id
+  cidr_block        = "10.200.1.0/24"
+  availability_zone = data.aws_availability_zones.aurora_azs.names[0]
+  tags = {{ Name = join("-", [var.project_name, "{safe_cid}", "subnet-a"]) }}
+}}
+
+resource "aws_subnet" "{cid}_subnet_b" {{
+  vpc_id            = aws_vpc.{cid}_vpc.id
+  cidr_block        = "10.200.2.0/24"
+  availability_zone = data.aws_availability_zones.aurora_azs.names[1]
+  tags = {{ Name = join("-", [var.project_name, "{safe_cid}", "subnet-b"]) }}
+}}
+
+resource "aws_db_subnet_group" "{cid}_subnet_group" {{
+  name       = join("-", [var.project_name, "{safe_cid}", "sg"])
+  subnet_ids = [aws_subnet.{cid}_subnet_a.id, aws_subnet.{cid}_subnet_b.id]
+  tags = {{ Name = join("-", [var.project_name, "{safe_cid}", "subnet-group"]) }}
+}}
+
+# --- Aurora Cluster ---
+resource "aws_rds_cluster" "{cid}" {{
+  cluster_identifier  = join("-", [var.project_name, "{safe_cid}"])
   engine              = "{engine}"
-  master_username     = "admin"
+  master_username     = "dbadmin"
   master_password     = var.db_password
+  db_subnet_group_name = aws_db_subnet_group.{cid}_subnet_group.name
   skip_final_snapshot = true
   storage_encrypted   = true
-  tags = {{ Name = "${{var.project_name}}-{cid}" }}
+  tags = {{
+    Name = join("-", [var.project_name, "{safe_cid}"])
+  }}
 }}
 
 resource "aws_rds_cluster_instance" "{cid}_instances" {{
   count              = {inst_count}
-  identifier         = "${{var.project_name}}-{cid}-${{count.index}}"
+  identifier         = join("-", [var.project_name, "{safe_cid}", tostring(count.index)])
   cluster_identifier = aws_rds_cluster.{cid}.id
-  instance_class     = "{params.get('instance_class', 'db.r5.large')}"
+  instance_class     = "{inst_class}"
   engine             = aws_rds_cluster.{cid}.engine
 }}
 '''
         return ToolResult(
             node=ToolNode(id=cid, type="aws_aurora", label=params.get("label", cid),
-                          config=ToolNodeConfig(engine=engine, instance_type=params.get("instance_class", "db.r5.large"))),
+                          config=ToolNodeConfig(engine=engine, instance_type=inst_class)),
             terraform_code={"database.tf": tf_code},
         )
 
@@ -75,7 +124,7 @@ class CreateDynamoDBTableTool(BaseTool):
     type = "S"
   }}'''
         tf_code = f'''resource "aws_dynamodb_table" "{tid}" {{
-  name         = "${{var.project_name}}-{tid}"
+  name         = join("-", [var.project_name, "{tid}"])
   billing_mode = "{params.get('billing_mode', 'PAY_PER_REQUEST')}"
   hash_key     = "{hk}"
 {range_attr}
@@ -84,7 +133,9 @@ class CreateDynamoDBTableTool(BaseTool):
     type = "{params.get('hash_key_type', 'S')}"
   }}
 
-  tags = {{ Name = "${{var.project_name}}-{tid}" }}
+  tags = {{
+    Name = join("-", [var.project_name, "{tid}"])
+  }}
 }}
 '''
         return ToolResult(
@@ -112,14 +163,16 @@ class CreateRedshiftClusterTool(BaseTool):
     def execute(self, params: dict[str, Any]) -> ToolResult:
         cid = params["cluster_id"]
         tf_code = f'''resource "aws_redshift_cluster" "{cid}" {{
-  cluster_identifier = "${{var.project_name}}-{cid}"
+  cluster_identifier = join("-", [var.project_name, "{cid}"])
   database_name      = "{params.get('db_name', 'analytics')}"
   master_username    = "admin"
   master_password    = var.db_password
   node_type          = "{params.get('node_type', 'dc2.large')}"
   number_of_nodes    = {params.get('number_of_nodes', 2)}
   skip_final_snapshot = true
-  tags = {{ Name = "${{var.project_name}}-{cid}" }}
+  tags = {{
+    Name = join("-", [var.project_name, "{cid}"])
+  }}
 }}
 '''
         return ToolResult(
@@ -148,12 +201,14 @@ class CreateElastiCacheClusterTool(BaseTool):
         cid = params["cache_id"]
         engine = params.get("engine", "redis")
         tf_code = f'''resource "aws_elasticache_cluster" "{cid}" {{
-  cluster_id      = "${{var.project_name}}-{cid}"
+  cluster_id      = join("-", [var.project_name, "{cid}"])
   engine          = "{engine}"
   node_type       = "{params.get('node_type', 'cache.t3.micro')}"
   num_cache_nodes = {params.get('num_cache_nodes', 1)}
   port            = {6379 if engine == 'redis' else 11211}
-  tags = {{ Name = "${{var.project_name}}-{cid}" }}
+  tags = {{
+    Name = join("-", [var.project_name, "{cid}"])
+  }}
 }}
 '''
         return ToolResult(
@@ -179,9 +234,11 @@ class CreateNeptuneClusterTool(BaseTool):
     def execute(self, params: dict[str, Any]) -> ToolResult:
         nid = params["neptune_id"]
         tf_code = f'''resource "aws_neptune_cluster" "{nid}" {{
-  cluster_identifier  = "${{var.project_name}}-{nid}"
+  cluster_identifier  = join("-", [var.project_name, "{nid}"])
   skip_final_snapshot = true
-  tags = {{ Name = "${{var.project_name}}-{nid}" }}
+  tags = {{
+    Name = join("-", [var.project_name, "{nid}"])
+  }}
 }}
 
 resource "aws_neptune_cluster_instance" "{nid}_instance" {{
@@ -213,16 +270,18 @@ class CreateDocumentDBClusterTool(BaseTool):
     def execute(self, params: dict[str, Any]) -> ToolResult:
         did = params["docdb_id"]
         tf_code = f'''resource "aws_docdb_cluster" "{did}" {{
-  cluster_identifier  = "${{var.project_name}}-{did}"
+  cluster_identifier  = join("-", [var.project_name, "{did}"])
   master_username     = "admin"
   master_password     = var.db_password
   skip_final_snapshot = true
-  tags = {{ Name = "${{var.project_name}}-{did}" }}
+  tags = {{
+    Name = join("-", [var.project_name, "{did}"])
+  }}
 }}
 
 resource "aws_docdb_cluster_instance" "{did}_instances" {{
   count              = {params.get('instances', 2)}
-  identifier         = "${{var.project_name}}-{did}-${{count.index}}"
+  identifier         = join("-", [var.project_name, "{did}", tostring(count.index)])
   cluster_identifier = aws_docdb_cluster.{did}.id
   instance_class     = "{params.get('instance_class', 'db.r5.large')}"
 }}
@@ -287,8 +346,10 @@ class CreateTimestreamDatabaseTool(BaseTool):
     def execute(self, params: dict[str, Any]) -> ToolResult:
         tid = params["ts_id"]
         tf_code = f'''resource "aws_timestreamwrite_database" "{tid}" {{
-  database_name = "${{var.project_name}}-{tid}"
-  tags = {{ Name = "${{var.project_name}}-{tid}" }}
+  database_name = join("-", [var.project_name, "{tid}"])
+  tags = {{
+    Name = join("-", [var.project_name, "{tid}"])
+  }}
 }}
 
 resource "aws_timestreamwrite_table" "{tid}_table" {{

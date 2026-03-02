@@ -135,6 +135,37 @@ class TerraformExecutor:
             ["destroy", "-auto-approve", "-no-color", "-input=false"], workspace_dir
         )
 
+    async def destroy_target(self, workspace_dir: Path, resource_address: str) -> tuple[int, str]:
+        """
+        Run `terraform destroy -target=<resource_address>` for a single resource.
+
+        Args:
+            workspace_dir: Path to the Terraform workspace.
+            resource_address: Fully-qualified resource address, e.g.
+                              'aws_ecs_service.main' or 'aws_s3_bucket.content_bucket'.
+        Returns:
+            (return_code, combined_output)
+        """
+        # Validate resource address — allow all valid Terraform state address characters.
+        # Terraform addresses look like: aws_ecs_service.my-service, module.vpc.aws_vpc.main,
+        # aws_subnet.private[0].  Shell injection is not possible since args are passed as
+        # a list to subprocess (not via shell=True), but we still guard against nonsense.
+        ALLOWED = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-[]{}()')
+        if not resource_address or not all(c in ALLOWED for c in resource_address):
+            bad_chars = [c for c in resource_address if c not in ALLOWED]
+            raise ValueError(
+                f"Invalid resource address {resource_address!r}. "
+                f"Disallowed characters: {bad_chars}"
+            )
+        return await self._run_command(
+            ["destroy", f"-target={resource_address}", "-auto-approve", "-no-color", "-input=false"],
+            workspace_dir,
+        )
+
+    async def state_list(self, workspace_dir: Path) -> tuple[int, str]:
+        """Run `terraform state list` to get all resources from the state file."""
+        return await self._run_command(["state", "list", "-no-color"], workspace_dir)
+
     async def execute_stream(
         self,
         args: list[str],
@@ -142,7 +173,8 @@ class TerraformExecutor:
     ) -> AsyncIterator[str]:
         """
         Execute a terraform command and yield stdout/stderr line by line.
-        Uses a thread and asyncio.Queue to verify Windows compatibility.
+        Uses a background thread and asyncio.Queue for Windows compatibility.
+        Lines are yielded in real-time as the process produces them.
         """
         cmd = [self.terraform_binary] + args
         env = _get_refreshed_env()
@@ -151,50 +183,55 @@ class TerraformExecutor:
         logger.info(f"Streaming CMD: {' '.join(cmd)} in {workspace_str}")
 
         queue: asyncio.Queue[str | None] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
 
-        def _read_stream(process):
+        def _read_stream():
+            """Read process output in a background thread, pushing lines to the queue."""
             try:
-                # Iterate over stdout (merged with stderr)
-                for line in iter(process.stdout.readline, ""):
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=workspace_str,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,  # Line buffered
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                # Read line-by-line and push to queue
+                for line in iter(proc.stdout.readline, ""):
                     if line:
                         asyncio.run_coroutine_threadsafe(queue.put(line), loop)
                     else:
                         break
+                proc.stdout.close()
+                return_code = proc.wait()
+                if return_code != 0:
+                    asyncio.run_coroutine_threadsafe(
+                        queue.put(f"\n[ERROR] Command failed with exit code {return_code}\n"),
+                        loop,
+                    )
             except Exception as e:
                 logger.error(f"Stream reader error: {e}")
+                asyncio.run_coroutine_threadsafe(
+                    queue.put(f"\n[ERROR] Stream reader exception: {e}\n"), loop
+                )
             finally:
-                process.stdout.close()
                 asyncio.run_coroutine_threadsafe(queue.put(None), loop)
 
-        loop = asyncio.get_running_loop()
-        
-        # Start subprocess with Popen (blocking, but fast to start)
-        process = subprocess.Popen(
-            cmd,
-            cwd=workspace_str,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,  # Line buffered
-            encoding="utf-8",
-            errors="replace"
-        )
+        # Launch reader in background thread (non-blocking!)
+        reader_future = loop.run_in_executor(None, _read_stream)
 
-        # Start reader thread
-        await asyncio.to_thread(_read_stream, process)
-
-        # Consume queue
+        # Yield lines as they arrive from the background thread
         while True:
             line = await queue.get()
             if line is None:
                 break
             yield line
 
-        # Wait for exit code
-        return_code = process.wait()
-        if return_code != 0:
-            yield f"\n[ERROR] Command failed with exit code {return_code}"
+        # Ensure the reader thread is finished
+        await reader_future
 
     def _run_sync(self, cmd: list[str], cwd: str, env: dict[str, str]) -> tuple[int, str]:
         """

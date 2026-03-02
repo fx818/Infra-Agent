@@ -27,12 +27,16 @@ class CreateDynamoDBTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         tid = params["table_id"]
-        table_name = params.get("table_name") or f"${{var.project_name}}-{tid}"
         pk = params.get("partition_key", "id")
         sk = params.get("sort_key", "")
         billing = params.get("billing_mode", "PAY_PER_REQUEST")
         streams = params.get("enable_streams", False)
         pitr = params.get("enable_point_in_time_recovery", True)
+
+        # Use provided table_name or generate one
+        table_name_expr = f'join("-", [var.project_name, "{tid}"])'
+        if params.get("table_name"):
+            table_name_expr = f'"{params["table_name"]}"'
 
         sk_block = f'''
   range_key = "{sk}"''' if sk else ""
@@ -55,7 +59,7 @@ class CreateDynamoDBTool(BaseTool):
 
         tf_code = f'''
 resource "aws_dynamodb_table" "{tid}" {{
-  name         = "{table_name}"
+  name         = {table_name_expr}
   billing_mode = "{billing}"{billing_block}
   hash_key     = "{pk}"{sk_block}{streams_block}
 
@@ -68,7 +72,9 @@ resource "aws_dynamodb_table" "{tid}" {{
     enabled = {str(pitr).lower()}
   }}
 
-  tags = {{ Name = "${{var.project_name}}-{tid}" }}
+  tags = {{
+    Name = join("-", [var.project_name, "{tid}"])
+  }}
 }}
 '''
         return ToolResult(

@@ -37,14 +37,18 @@ resource "aws_subnet" "{vid}_public_{i}" {{
   cidr_block        = cidrsubnet(aws_vpc.{vid}.cidr_block, 8, {i})
   availability_zone = data.aws_availability_zones.available.names[{i}]
   map_public_ip_on_launch = true
-  tags = {{ Name = "${{var.project_name}}-public-{i}" }}
+  tags = {{
+    Name = join("-", [var.project_name, "public", "{i}"])
+  }}
 }}
 
 resource "aws_subnet" "{vid}_private_{i}" {{
   vpc_id            = aws_vpc.{vid}.id
   cidr_block        = cidrsubnet(aws_vpc.{vid}.cidr_block, 8, {i + 10})
   availability_zone = data.aws_availability_zones.available.names[{i}]
-  tags = {{ Name = "${{var.project_name}}-private-{i}" }}
+  tags = {{
+    Name = join("-", [var.project_name, "private", "{i}"])
+  }}
 }}''')
 
         nat_block = ""
@@ -52,13 +56,17 @@ resource "aws_subnet" "{vid}_private_{i}" {{
             nat_block = f'''
 resource "aws_eip" "{vid}_nat_eip" {{
   domain = "vpc"
-  tags = {{ Name = "${{var.project_name}}-nat-eip" }}
+  tags = {{
+    Name = join("-", [var.project_name, "nat-eip"])
+  }}
 }}
 
 resource "aws_nat_gateway" "{vid}_nat" {{
   allocation_id = aws_eip.{vid}_nat_eip.id
   subnet_id     = aws_subnet.{vid}_public_0.id
-  tags = {{ Name = "${{var.project_name}}-nat" }}
+  tags = {{
+    Name = join("-", [var.project_name, "nat"])
+  }}
 }}
 
 resource "aws_route_table" "{vid}_private" {{
@@ -67,7 +75,9 @@ resource "aws_route_table" "{vid}_private" {{
     cidr_block     = "0.0.0.0/0"
     nat_gateway_id = aws_nat_gateway.{vid}_nat.id
   }}
-  tags = {{ Name = "${{var.project_name}}-private-rt" }}
+  tags = {{
+    Name = join("-", [var.project_name, "private-rt"])
+  }}
 }}
 '''
 
@@ -79,12 +89,16 @@ resource "aws_vpc" "{vid}" {{
   cidr_block           = "{cidr}"
   enable_dns_support   = true
   enable_dns_hostnames = true
-  tags = {{ Name = "${{var.project_name}}-vpc" }}
+  tags = {{
+    Name = join("-", [var.project_name, "vpc"])
+  }}
 }}
 
 resource "aws_internet_gateway" "{vid}_igw" {{
   vpc_id = aws_vpc.{vid}.id
-  tags = {{ Name = "${{var.project_name}}-igw" }}
+  tags = {{
+    Name = join("-", [var.project_name, "igw"])
+  }}
 }}
 
 resource "aws_route_table" "{vid}_public" {{
@@ -93,7 +107,9 @@ resource "aws_route_table" "{vid}_public" {{
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.{vid}_igw.id
   }}
-  tags = {{ Name = "${{var.project_name}}-public-rt" }}
+  tags = {{
+    Name = join("-", [var.project_name, "public-rt"])
+  }}
 }}
 {"".join(subnet_blocks)}
 {nat_block}

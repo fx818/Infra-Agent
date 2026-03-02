@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import React, { useEffect, useState, useCallback } from 'react';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { projectsApi } from '../../api/projects';
 import type { Project } from '../../types';
 import { ArchitectureTab } from './ArchitectureTab';
@@ -16,24 +16,26 @@ import {
 
 export const ProjectDetail: React.FC = () => {
     const { id } = useParams<{ id: string }>();
+    const navigate = useNavigate();
     const [project, setProject] = useState<Project | null>(null);
     const [loading, setLoading] = useState(true);
     const [activeTab, setActiveTab] = useState<'architecture' | 'deployment' | 'monitoring'>('architecture');
 
-    useEffect(() => {
-        const fetchProject = async () => {
-            if (!id) return;
-            try {
-                const data = await projectsApi.getOne(id);
-                setProject(data);
-            } catch (error) {
-                console.error('Failed to fetch project:', error);
-            } finally {
-                setLoading(false);
-            }
-        };
-        fetchProject();
+    const fetchProject = useCallback(async () => {
+        if (!id) return;
+        try {
+            const data = await projectsApi.getOne(id);
+            setProject(data);
+        } catch (error) {
+            console.error('Failed to fetch project:', error);
+        } finally {
+            setLoading(false);
+        }
     }, [id]);
+
+    useEffect(() => {
+        fetchProject();
+    }, [fetchProject]);
 
     if (loading) {
         return (
@@ -60,6 +62,19 @@ export const ProjectDetail: React.FC = () => {
         );
     }
 
+    const getStatusBadge = (status: string) => {
+        const statusMap: Record<string, string> = {
+            deployed: 'badge-success',
+            success: 'badge-success',
+            partial_deployed: 'bg-amber-500/15 text-amber-400 border border-amber-500/30',
+            failed: 'badge-danger',
+            destroyed: 'badge-danger',
+            deploying: 'badge-info',
+            running: 'badge-info',
+        };
+        return statusMap[status] || 'badge-warning';
+    };
+
     const tabs = [
         { key: 'architecture' as const, label: 'Architecture', icon: Layers },
         { key: 'deployment' as const, label: 'Deployment', icon: Server },
@@ -79,11 +94,8 @@ export const ProjectDetail: React.FC = () => {
                 <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-3">
                         <h1 className="text-xl font-bold truncate">{project.name}</h1>
-                        <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-semibold shrink-0 ${project.status === 'deployed'
-                            ? 'badge-success'
-                            : 'badge-warning'
-                            }`}>
-                            {project.status.toUpperCase()}
+                        <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-semibold shrink-0 ${getStatusBadge(project.status)}`}>
+                            {project.status === 'partial_deployed' ? 'PARTIAL' : project.status.toUpperCase()}
                         </span>
                     </div>
                     {project.description && (
@@ -92,13 +104,25 @@ export const ProjectDetail: React.FC = () => {
                 </div>
 
                 {/* Edit in Canvas Button */}
-                <Link
-                    to={`/drag-build?projectId=${id}`}
+                <button
+                    onClick={() => {
+                        const confirmed = window.confirm(
+                            '⚠️ Design Infrastructure Carefully\n\n' +
+                            'Infrastructure should be designed carefully and correctly so that deployment doesn\'t have any issues.\n\n' +
+                            '• Ensure all service connections are valid\n' +
+                            '• VPC is required for RDS, ECS, and ElastiCache\n' +
+                            '• Review the architecture before deploying\n\n' +
+                            'Do you want to proceed to the canvas editor?'
+                        );
+                        if (confirmed) {
+                            navigate(`/drag-build?projectId=${id}`);
+                        }
+                    }}
                     className="flex items-center gap-2 px-4 py-2 rounded-xl bg-primary/10 text-primary hover:bg-primary/20 transition-all border border-primary/20 text-xs font-semibold"
                 >
                     <Edit3 size={14} />
                     <span>Edit in Canvas</span>
-                </Link>
+                </button>
             </div>
 
             {/* Tabs */}
@@ -125,7 +149,7 @@ export const ProjectDetail: React.FC = () => {
             {/* Content */}
             <div className="flex-1 overflow-hidden">
                 {activeTab === 'architecture' && <ArchitectureTab projectId={project.id} />}
-                {activeTab === 'deployment' && <DeploymentTab projectId={project.id} />}
+                {activeTab === 'deployment' && <DeploymentTab projectId={project.id} onStatusChange={fetchProject} />}
                 {activeTab === 'monitoring' && <MonitoringTab projectId={project.id} />}
             </div>
         </div>

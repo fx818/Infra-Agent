@@ -34,7 +34,7 @@ from app.services.ai.terraform_agent import TerraformAgent
 from app.services.ai.tool_agent import ToolAgent
 from app.services.ai.visual_agent import VisualAgent
 from app.services.terraform.workspace_manager import WorkspaceManager
-from app.utils.validators import sanitize_terraform_files, validate_architecture_graph
+from app.utils.validators import fix_terraform_files, sanitize_terraform_files, validate_architecture_graph
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,8 @@ async def generate_architecture(
         if errors:
             logger.warning("Architecture validation warnings: %s", errors)
 
-        # 3. Sanitize Terraform
+        # 3. Auto-fix LLM type errors (string booleans, etc.) then sanitize
+        terraform_files.files = fix_terraform_files(terraform_files.files)
         is_safe, issues = sanitize_terraform_files(terraform_files.files)
         if not is_safe:
             logger.warning("Terraform sanitization issues: %s", issues)
@@ -285,7 +286,8 @@ async def edit_architecture(
         tf_agent = TerraformAgent(llm=llm)
         terraform_files = await tf_agent.run(modified_graph, region=project.region, project_name=project.name)
 
-        # 4. Sanitize
+        # 4. Auto-fix LLM type errors then sanitize
+        terraform_files.files = fix_terraform_files(terraform_files.files)
         is_safe, issues = sanitize_terraform_files(terraform_files.files)
         if not is_safe:
             logger.warning("Terraform sanitization issues: %s", issues)

@@ -142,6 +142,7 @@ export interface DeploymentResponse {
     status: string;
     logs?: string;
     error_message?: string;
+    error_details?: string;
     started_at?: string;
     completed_at?: string;
     created_at?: string;

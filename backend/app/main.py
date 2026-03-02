@@ -74,6 +74,7 @@ from app.api.monitoring import router as monitoring_router
 from app.api.cost_analysis import router as cost_analysis_router
 from app.api.logs import router as logs_router
 from app.api.drag_build import router as drag_build_router
+from app.api.aws_explorer import router as aws_explorer_router
 
 app.include_router(auth_router)
 app.include_router(projects_router)
@@ -85,6 +86,7 @@ app.include_router(monitoring_router)
 app.include_router(cost_analysis_router)
 app.include_router(logs_router)
 app.include_router(drag_build_router)
+app.include_router(aws_explorer_router)
 
 
 @app.get("/", tags=["health"])

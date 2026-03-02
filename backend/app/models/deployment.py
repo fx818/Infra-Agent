@@ -17,7 +17,7 @@ class Deployment(Base):
     architecture_version: Mapped[int] = mapped_column(Integer, nullable=False)
 
     action: Mapped[str] = mapped_column(String(20), nullable=False)  # plan, apply, destroy
-    status: Mapped[str] = mapped_column(String(30), default="pending")  # pending, running, success, failed
+    status: Mapped[str] = mapped_column(String(30), default="pending")  # pending, running, success, failed, partial_deployed, destroyed
     logs: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 

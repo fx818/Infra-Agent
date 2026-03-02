@@ -42,11 +42,6 @@ class CreateEC2InstanceTool(BaseTool):
                 "description": "Whether to assign a public IP address.",
                 "default": True,
             },
-            "key_pair_name": {
-                "type": "string",
-                "description": "SSH key pair name for access. Leave empty to skip.",
-                "default": "",
-            },
         },
         "required": ["instance_id", "label"],
     }
@@ -77,7 +72,7 @@ class CreateEC2InstanceTool(BaseTool):
   associate_public_ip_address = {str(public_ip).lower()}
 
   tags = {{
-    Name = "${{var.project_name}}-{iid}"
+    Name = join("-", [var.project_name, "{iid}"])
   }}
 }}
 '''

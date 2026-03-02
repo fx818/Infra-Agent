@@ -22,8 +22,10 @@ class CreateS3BucketTool(BaseTool):
     def execute(self, params: dict[str, Any]) -> ToolResult:
         bid = params["bucket_id"]
         tf_code = f'''resource "aws_s3_bucket" "{bid}" {{
-  bucket = "${{var.project_name}}-{bid}"
-  tags   = {{ Name = "${{var.project_name}}-{bid}" }}
+  bucket = join("-", [var.project_name, "{bid}"])
+  tags = {{
+    Name = join("-", [var.project_name, "{bid}"])
+  }}
 }}
 
 resource "aws_s3_bucket_versioning" "{bid}_versioning" {{

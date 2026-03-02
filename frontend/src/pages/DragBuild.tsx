@@ -16,7 +16,7 @@ import type { Edge, Node, Connection, ReactFlowInstance } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import {
     Search, Save, Blocks, ChevronDown, ChevronRight,
-    GripVertical, Loader2, Undo2,
+    GripVertical, Loader2, Undo2, AlertTriangle, X,
 } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { getAwsLogo } from '../utils/awsLogos';
@@ -56,6 +56,21 @@ const DragBuildInner: React.FC = () => {
     const [searchParams] = useSearchParams();
     const editingProjectId = searchParams.get('projectId');
     const [loadingProject, setLoadingProject] = useState(false);
+
+    // ── Warning modal state ────────────────────────────────────────
+    const [showWarning, setShowWarning] = useState(false);
+
+    useEffect(() => {
+        const dismissed = sessionStorage.getItem('infra_design_warning_dismissed');
+        if (!dismissed) {
+            setShowWarning(true);
+        }
+    }, []);
+
+    const dismissWarning = () => {
+        setShowWarning(false);
+        sessionStorage.setItem('infra_design_warning_dismissed', 'true');
+    };
 
     // ── Service catalog filtering ──────────────────────────────────
     const servicesByCategory = useMemo(() => getServicesByCategory(), []);
@@ -257,17 +272,18 @@ const DragBuildInner: React.FC = () => {
                 })),
             };
 
-            let response;
+            let projectId: number | string;
             if (editingProjectId) {
-                // Update existing project
-                response = await api.put(`/projects/${editingProjectId}`, payload);
+                // Update existing project (both metadata + architecture)
+                const response = await api.put(`/drag-build/update/${editingProjectId}`, payload);
+                projectId = response.data.id ?? editingProjectId;
             } else {
                 // Create new project
-                response = await api.post('/drag-build/save', payload);
+                const response = await api.post('/drag-build/save', payload);
+                projectId = response.data.id;
             }
 
-            const project = response.data;
-            navigate(`/projects/${project.id || editingProjectId}`);
+            navigate(`/projects/${projectId}`);
         } catch (err) {
             console.error('Failed to save project:', err);
             setSaving(false);
@@ -291,7 +307,86 @@ const DragBuildInner: React.FC = () => {
     };
 
     return (
-        <div style={{ display: 'flex', height: '100%', gap: 0 }}>
+        <div style={{ display: 'flex', height: '100%', gap: 0, position: 'relative' }}>
+            {/* ═══ Warning Modal ═══ */}
+            {showWarning && (
+                <div style={{
+                    position: 'fixed', inset: 0, zIndex: 9999,
+                    background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(8px)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}>
+                    <div style={{
+                        maxWidth: '480px', width: '90%',
+                        background: 'rgba(13,17,23,0.95)',
+                        border: '1px solid rgba(255,255,255,0.1)',
+                        borderRadius: '16px', padding: '28px',
+                        boxShadow: '0 25px 60px rgba(0,0,0,0.5)',
+                    }}>
+                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: '14px' }}>
+                            <div style={{
+                                width: '44px', height: '44px', borderRadius: '12px',
+                                background: 'linear-gradient(135deg, rgba(245,158,11,0.15), rgba(239,68,68,0.15))',
+                                border: '1px solid rgba(245,158,11,0.25)',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                flexShrink: 0,
+                            }}>
+                                <AlertTriangle size={22} color="#f59e0b" />
+                            </div>
+                            <div style={{ flex: 1 }}>
+                                <h3 style={{
+                                    fontSize: '15px', fontWeight: 700, color: '#f1f5f9',
+                                    margin: '0 0 8px 0',
+                                }}>
+                                    Design Infrastructure Carefully
+                                </h3>
+                                <p style={{
+                                    fontSize: '12px', color: 'rgba(255,255,255,0.5)',
+                                    lineHeight: 1.7, margin: '0 0 6px 0',
+                                }}>
+                                    Infrastructure should be designed carefully and correctly so that
+                                    deployment doesn't have any issues. Please keep in mind:
+                                </p>
+                                <ul style={{
+                                    fontSize: '11px', color: 'rgba(255,255,255,0.45)',
+                                    lineHeight: 1.8, margin: '0 0 16px 0',
+                                    paddingLeft: '18px',
+                                }}>
+                                    <li>Ensure all service connections are valid (e.g., ECS needs VPC, RDS needs subnets)</li>
+                                    <li>VPC is required for RDS, ECS, and ElastiCache services</li>
+                                    <li>Security groups should be connected to resources that need them</li>
+                                    <li>Review the architecture before deploying to avoid failed deployments</li>
+                                </ul>
+                                <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                                    <button
+                                        onClick={dismissWarning}
+                                        style={{
+                                            padding: '8px 20px', borderRadius: '8px',
+                                            background: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
+                                            border: 'none', color: 'white',
+                                            fontSize: '12px', fontWeight: 700,
+                                            cursor: 'pointer',
+                                            boxShadow: '0 2px 12px rgba(99,102,241,0.3)',
+                                        }}
+                                    >
+                                        I Understand
+                                    </button>
+                                </div>
+                            </div>
+                            <button
+                                onClick={dismissWarning}
+                                style={{
+                                    background: 'none', border: 'none',
+                                    color: 'rgba(255,255,255,0.3)', cursor: 'pointer',
+                                    padding: '4px', flexShrink: 0,
+                                }}
+                            >
+                                <X size={16} />
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* ═══ Left Toolbar ═══ */}
             <div style={{
                 width: '280px',

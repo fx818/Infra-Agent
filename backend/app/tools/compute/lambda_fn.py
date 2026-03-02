@@ -52,7 +52,7 @@ class CreateLambdaFunctionTool(BaseTool):
         handler = params.get("handler", "index.handler")
 
         tf_code = f'''resource "aws_lambda_function" "{fid}" {{
-  function_name = "${{var.project_name}}-{fid}"
+  function_name = join("-", [var.project_name, "{fid}"])
   role          = aws_iam_role.{fid}_role.arn
   handler       = "{handler}"
   runtime       = "{runtime}"
@@ -61,12 +61,12 @@ class CreateLambdaFunctionTool(BaseTool):
   filename      = "{fid}.zip"
 
   tags = {{
-    Name = "${{var.project_name}}-{fid}"
+    Name = join("-", [var.project_name, "{fid}"])
   }}
 }}
 
 resource "aws_iam_role" "{fid}_role" {{
-  name = "${{var.project_name}}-{fid}-role"
+  name = join("-", [var.project_name, "{fid}", "role"])
 
   assume_role_policy = jsonencode({{
     Version = "2012-10-17"
@@ -84,7 +84,7 @@ resource "aws_iam_role_policy_attachment" "{fid}_basic" {{
 }}
 
 resource "aws_cloudwatch_log_group" "{fid}_logs" {{
-  name              = "/aws/lambda/${{var.project_name}}-{fid}"
+  name              = join("/", ["", "aws", "lambda", join("-", [var.project_name, "{fid}"])])
   retention_in_days = 14
 }}
 '''

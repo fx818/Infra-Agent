@@ -13,7 +13,8 @@ import {
     ArrowUpRight,
     Trash2,
     RefreshCw,
-    AlertTriangle
+    AlertTriangle,
+    Activity
 } from 'lucide-react';
 
 interface ProjectDeployment {
@@ -24,6 +25,7 @@ interface ProjectDeployment {
 export const Deployments: React.FC = () => {
     const [items, setItems] = useState<ProjectDeployment[]>([]);
     const [loading, setLoading] = useState(true);
+    const [activeFilters, setActiveFilters] = useState<Set<string>>(new Set());
 
     useEffect(() => {
         fetchAll();
@@ -58,6 +60,7 @@ export const Deployments: React.FC = () => {
             running: { icon: <Loader2 size={14} className="animate-spin" />, class: 'badge-info', label: 'Running' },
             pending: { icon: <Clock size={14} />, class: 'badge-warning', label: 'Pending' },
             destroyed: { icon: <Trash2 size={14} />, class: 'badge-danger', label: 'Destroyed' },
+            partial_deployed: { icon: <AlertTriangle size={14} />, class: 'bg-amber-500/15 text-amber-400 border border-amber-500/30', label: 'Partial Deploy' },
         };
         return map[s || ''] || { icon: <Clock size={14} />, class: 'badge-warning', label: 'Not Deployed' };
     };
@@ -73,9 +76,41 @@ export const Deployments: React.FC = () => {
         );
     }
 
-    const deployed = items.filter(i => i.deployment?.status === 'success' || i.deployment?.status === 'deployed');
-    const failed = items.filter(i => i.deployment?.status === 'failed');
+    const getFilterGroup = (item: ProjectDeployment): string => {
+        const s = item.deployment?.status || item.project.status || '';
+        if (s === 'success' || s === 'deployed') return 'Deployed';
+        if (s === 'failed') return 'Failed';
+        if (s === 'partial_deployed') return 'Partial';
+        if (s === 'destroyed') return 'Destroyed';
+        return 'Inactive';
+    };
+
+    const deployed = items.filter(i => getFilterGroup(i) === 'Deployed');
+    const failed = items.filter(i => getFilterGroup(i) === 'Failed');
+    const partial = items.filter(i => getFilterGroup(i) === 'Partial');
+    const destroyedItems = items.filter(i => getFilterGroup(i) === 'Destroyed');
+    const inactive = items.filter(i => getFilterGroup(i) === 'Inactive');
     const total = items.length;
+
+    const statCards = [
+        { key: 'Total', label: 'Total', value: total, icon: <Server size={18} className="text-blue-400" />, bg: 'bg-blue-500/10', ring: 'ring-blue-500/40' },
+        { key: 'Deployed', label: 'Deployed', value: deployed.length, icon: <CheckCircle2 size={18} className="text-emerald-400" />, bg: 'bg-emerald-500/10', ring: 'ring-emerald-500/40' },
+        { key: 'Failed', label: 'Failed', value: failed.length, icon: <AlertTriangle size={18} className="text-red-400" />, bg: 'bg-red-500/10', ring: 'ring-red-500/40' },
+        { key: 'Partial', label: 'Partial', value: partial.length, icon: <Activity size={18} className="text-amber-400" />, bg: 'bg-amber-500/10', ring: 'ring-amber-500/40' },
+        { key: 'Destroyed', label: 'Destroyed', value: destroyedItems.length, icon: <Trash2 size={18} className="text-rose-400" />, bg: 'bg-rose-500/10', ring: 'ring-rose-500/40' },
+        { key: 'Inactive', label: 'Inactive', value: inactive.length, icon: <Clock size={18} className="text-slate-400" />, bg: 'bg-slate-500/10', ring: 'ring-slate-500/40' },
+    ];
+
+    const toggleFilter = (key: string) => {
+        if (key === 'Total') { setActiveFilters(new Set()); return; }
+        setActiveFilters(prev => {
+            const next = new Set(prev);
+            if (next.has(key)) next.delete(key); else next.add(key);
+            return next;
+        });
+    };
+
+    const filteredItems = activeFilters.size === 0 ? items : items.filter(i => activeFilters.has(getFilterGroup(i)));
 
     return (
         <div className="max-w-5xl mx-auto space-y-6 animate-fade-in">
@@ -94,34 +129,26 @@ export const Deployments: React.FC = () => {
             </div>
 
             {/* Summary Stats */}
-            <div className="grid grid-cols-3 gap-4">
-                <div className="glass-card p-4 flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-blue-500/10 flex items-center justify-center">
-                        <Server size={18} className="text-blue-400" />
-                    </div>
-                    <div>
-                        <p className="text-2xl font-bold">{total}</p>
-                        <p className="text-[11px] text-muted-foreground/50">Total Projects</p>
-                    </div>
-                </div>
-                <div className="glass-card p-4 flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-emerald-500/10 flex items-center justify-center">
-                        <CheckCircle2 size={18} className="text-emerald-400" />
-                    </div>
-                    <div>
-                        <p className="text-2xl font-bold">{deployed.length}</p>
-                        <p className="text-[11px] text-muted-foreground/50">Active Deployments</p>
-                    </div>
-                </div>
-                <div className="glass-card p-4 flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-red-500/10 flex items-center justify-center">
-                        <AlertTriangle size={18} className="text-red-400" />
-                    </div>
-                    <div>
-                        <p className="text-2xl font-bold">{failed.length}</p>
-                        <p className="text-[11px] text-muted-foreground/50">Failed</p>
-                    </div>
-                </div>
+            <div className="grid grid-cols-6 gap-3">
+                {statCards.map(card => {
+                    const isActive = card.key === 'Total' ? activeFilters.size === 0 : activeFilters.has(card.key);
+                    return (
+                        <div
+                            key={card.key}
+                            onClick={() => toggleFilter(card.key)}
+                            className={`glass-card p-3 flex items-center gap-2.5 cursor-pointer transition-all hover:bg-white/[0.03] select-none ${isActive ? `ring-1 ${card.ring} bg-white/[0.02]` : 'opacity-70 hover:opacity-100'
+                                }`}
+                        >
+                            <div className={`w-8 h-8 rounded-lg ${card.bg} flex items-center justify-center shrink-0`}>
+                                {card.icon}
+                            </div>
+                            <div>
+                                <p className="text-lg font-bold leading-none">{card.value}</p>
+                                <p className="text-[10px] text-muted-foreground/50 mt-0.5">{card.label}</p>
+                            </div>
+                        </div>
+                    );
+                })}
             </div>
 
             {/* Deployment List */}
@@ -137,40 +164,45 @@ export const Deployments: React.FC = () => {
                 </div>
             ) : (
                 <div className="space-y-3">
-                    {items.map(({ project, deployment }) => {
+                    {filteredItems.map(({ project, deployment }) => {
                         const statusConfig = getStatusConfig(deployment?.status);
                         return (
                             <Link
                                 key={project.id}
                                 to={`/projects/${project.id}`}
-                                className="glass-card p-4 flex items-center gap-4 group hover:border-primary/20 transition-all cursor-pointer block"
+                                className="glass-card p-4 group hover:border-primary/20 transition-all cursor-pointer block"
                             >
-                                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500/10 to-purple-500/10 border border-primary/10 flex items-center justify-center shrink-0">
-                                    <Rocket size={18} className="text-primary/60" />
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                    <div className="flex items-center gap-2">
-                                        <h3 className="text-sm font-semibold truncate group-hover:text-primary transition-colors">{project.name}</h3>
-                                        <div className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold ${statusConfig.class}`}>
-                                            {statusConfig.icon}
-                                            <span>{statusConfig.label}</span>
+                                <div className="flex items-center gap-4">
+                                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500/10 to-purple-500/10 border border-primary/10 flex items-center justify-center shrink-0">
+                                        <Rocket size={18} className="text-primary/60" />
+                                    </div>
+                                    <div className="flex-1 min-w-0">
+                                        <div className="flex items-center gap-2">
+                                            <h3 className="text-sm font-semibold truncate group-hover:text-primary transition-colors">{project.name}</h3>
+                                            <div className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold ${statusConfig.class}`}>
+                                                {statusConfig.icon}
+                                                <span>{statusConfig.label}</span>
+                                            </div>
+                                        </div>
+                                        <div className="flex items-center gap-4 mt-1">
+                                            <span className="text-[11px] text-muted-foreground/40">{project.region || 'us-east-1'}</span>
+                                            {deployment?.completed_at && (
+                                                <span className="text-[11px] text-muted-foreground/30">
+                                                    Last: {new Date(deployment.completed_at).toLocaleString()}
+                                                </span>
+                                            )}
                                         </div>
                                     </div>
-                                    <div className="flex items-center gap-4 mt-1">
-                                        <span className="text-[11px] text-muted-foreground/40">{project.region || 'us-east-1'}</span>
-                                        {deployment?.completed_at && (
-                                            <span className="text-[11px] text-muted-foreground/30">
-                                                Last: {new Date(deployment.completed_at).toLocaleString()}
-                                            </span>
-                                        )}
-                                        {deployment?.error_message && (
-                                            <span className="text-[11px] text-red-400/60 truncate max-w-[300px]">
-                                                {deployment.error_message}
-                                            </span>
-                                        )}
-                                    </div>
+                                    <ArrowUpRight size={16} className="text-muted-foreground/20 group-hover:text-primary/60 transition-colors shrink-0" />
                                 </div>
-                                <ArrowUpRight size={16} className="text-muted-foreground/20 group-hover:text-primary/60 transition-colors shrink-0" />
+                                {deployment?.error_message && (
+                                    <div className="mt-2 flex items-start gap-1.5 px-2.5 py-1.5 rounded-lg bg-red-500/[0.08] border border-red-500/15">
+                                        <AlertTriangle size={11} className="text-red-400/70 mt-0.5 shrink-0" />
+                                        <span className="text-[11px] text-red-400/70 leading-relaxed line-clamp-2">
+                                            {deployment.error_message}
+                                        </span>
+                                    </div>
+                                )}
                             </Link>
                         );
                     })}

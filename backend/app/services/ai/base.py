@@ -136,10 +136,44 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             # Try to extract JSON from markdown code blocks
             if "```json" in content:
                 json_str = content.split("```json")[1].split("```")[0].strip()
-                return json.loads(json_str)
+                try:
+                    return json.loads(json_str)
+                except json.JSONDecodeError:
+                    pass
             elif "```" in content:
                 json_str = content.split("```")[1].split("```")[0].strip()
-                return json.loads(json_str)
+                try:
+                    return json.loads(json_str)
+                except json.JSONDecodeError:
+                    pass
+
+            # Fix common LLM quirk: duplicate leading/trailing braces  e.g. "{\n{"
+            import re
+            stripped = content.strip()
+            # Remove duplicate opening braces: "{\n{" -> "{"
+            stripped = re.sub(r'^\{\s*\{', '{', stripped)
+            # Remove duplicate closing braces: "}\n}" -> "}"
+            stripped = re.sub(r'\}\s*\}$', '}', stripped)
+            try:
+                return json.loads(stripped)
+            except json.JSONDecodeError:
+                pass
+
+            # Last resort: find the outermost { ... } using brace matching
+            start = content.find('{')
+            if start != -1:
+                depth = 0
+                for i in range(start, len(content)):
+                    if content[i] == '{':
+                        depth += 1
+                    elif content[i] == '}':
+                        depth -= 1
+                        if depth == 0:
+                            try:
+                                return json.loads(content[start:i + 1])
+                            except json.JSONDecodeError:
+                                break
+
             raise ValueError(f"LLM response is not valid JSON: {content[:200]}")
 
     async def generate_with_tools(

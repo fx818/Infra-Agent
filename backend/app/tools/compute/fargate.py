@@ -27,11 +27,23 @@ class CreateFargateProfileTool(BaseTool):
         cluster_id = params["cluster_id"]
         namespace = params.get("namespace", "default")
 
-        tf_code = f'''resource "aws_eks_fargate_profile" "{pid}" {{
+        tf_code = f'''# Use default VPC subnets for Fargate
+data "aws_vpc" "default" {{
+  default = true
+}}
+
+data "aws_subnets" "default" {{
+  filter {{
+    name   = "vpc-id"
+    values = [data.aws_vpc.default.id]
+  }}
+}}
+
+resource "aws_eks_fargate_profile" "{pid}" {{
   cluster_name           = aws_eks_cluster.{cluster_id}.name
-  fargate_profile_name   = "${{var.project_name}}-{pid}"
+  fargate_profile_name   = join("-", [var.project_name, "{pid}"])
   pod_execution_role_arn = aws_iam_role.{pid}_fargate_role.arn
-  subnet_ids             = [for s in aws_subnet.private : s.id]
+  subnet_ids             = data.aws_subnets.default.ids
 
   selector {{
     namespace = "{namespace}"
@@ -39,7 +51,7 @@ class CreateFargateProfileTool(BaseTool):
 }}
 
 resource "aws_iam_role" "{pid}_fargate_role" {{
-  name = "${{var.project_name}}-{pid}-fargate-role"
+  name = join("-", [var.project_name, "{pid}", "fargate-role"])
   assume_role_policy = jsonencode({{
     Version = "2012-10-17"
     Statement = [{{ Action = "sts:AssumeRole", Effect = "Allow", Principal = {{ Service = "eks-fargate-pods.amazonaws.com" }} }}]
