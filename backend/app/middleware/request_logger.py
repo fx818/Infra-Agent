@@ -131,7 +131,33 @@ class RequestLoggerMiddleware(BaseHTTPMiddleware):
             response = await call_next(request)
             status_code = response.status_code
 
-            # Capture response body
+            # Never buffer streaming / SSE responses — consuming body_iterator
+            # would cause the entire stream to be held in memory and only
+            # delivered to the client once it finishes, killing live streaming.
+            content_type = response.headers.get("content-type", "")
+            is_streaming = (
+                "text/event-stream" in content_type
+                or "application/octet-stream" in content_type
+                or path.endswith("/stream")
+            )
+            if is_streaming:
+                duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+                _write_log_row({
+                    "timestamp": timestamp,
+                    "method": request.method,
+                    "path": path,
+                    "query_params": str(request.query_params) if request.query_params else "",
+                    "status_code": status_code,
+                    "duration_ms": duration_ms,
+                    "user_agent": request.headers.get("user-agent", "")[:100],
+                    "request_body": request_body_snippet,
+                    "response_body": "[streaming — not captured]",
+                    "error": "",
+                })
+                logger.info("%s %s → %d  (streaming)", request.method, path, status_code)
+                return response  # pass through unchanged — do NOT touch body_iterator
+
+            # Capture response body for normal (non-streaming) responses
             response_body_chunks = []
             async for chunk in response.body_iterator:
                 response_body_chunks.append(chunk)

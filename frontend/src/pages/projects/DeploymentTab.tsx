@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { flushSync } from 'react-dom';
 import { deploymentApi } from '../../api/deployment';
 import type { DeploymentResponse } from '../../types';
 import {
@@ -101,13 +102,17 @@ function colorizeLogLine(line: string, idx: number) {
     if (trimmed.startsWith('Warning:') || trimmed.includes('[WARNING]')) {
         return <span key={idx} className="text-amber-400">{line}{'\n'}</span>;
     }
-    // Success / creation lines
-    if (trimmed.includes('✓ Created') || trimmed.includes('✓ Destroyed') || trimmed.includes('is ready') || trimmed.includes('Provisioning complete') || trimmed.includes('Destruction complete') || trimmed.includes('[AUTO-ROLLBACK] ✓')) {
+    // Success / creation lines (including LLM-repaired)
+    if (trimmed.includes('\u2713 Created') || trimmed.includes('\u2713 Repaired') || trimmed.includes('\u2713 Destroyed') || trimmed.includes('is ready') || trimmed.includes('Provisioning complete') || trimmed.includes('Destruction complete') || trimmed.includes('[AUTO-ROLLBACK] \u2713')) {
         return <span key={idx} className="text-emerald-400 font-medium">{line}{'\n'}</span>;
     }
-    // Failure lines from boto3
-    if (trimmed.includes('✗ FAILED')) {
+    // Failure lines — match both ✗ glyph and plain ASCII FAILED:
+    if (trimmed.includes('\u2717') || trimmed.includes('FAILED:') || trimmed.includes('Repair attempt also failed')) {
         return <span key={idx} className="text-red-400 font-semibold">{line}{'\n'}</span>;
+    }
+    // LLM repair attempt lines
+    if (trimmed.includes('LLM-assisted repair') || trimmed.includes('LLM could not')) {
+        return <span key={idx} className="text-purple-400 italic">{line}{'\n'}</span>;
     }
     // Phase markers
     if (trimmed.startsWith('=== ') || trimmed.startsWith('Starting deployment') || trimmed.startsWith('Deployment complete')) {
@@ -145,6 +150,7 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
     const [error, setError] = useState('');
     const [copied, setCopied] = useState(false);
     const [elapsedSeconds, setElapsedSeconds] = useState(0);
+    const [liveLogs, setLiveLogs] = useState('');   // live-streamed log content (cleared after stream ends)
     const logEndRef = useRef<HTMLDivElement>(null);
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -157,7 +163,7 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
         if (deploying && logEndRef.current) {
             logEndRef.current.scrollIntoView({ behavior: 'smooth' });
         }
-    }, [status?.logs, deploying]);
+    }, [liveLogs, status?.logs, deploying]);
 
     // Timer during deployment
     useEffect(() => {
@@ -192,13 +198,14 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
     const handleDeploy = async () => {
         setDeploying(true);
         setError('');
+        setLiveLogs('');  // clear live log pane
         // Clear previous logs when starting new deploy
         setStatus(prev => prev ? { ...prev, logs: '', status: 'running', error_message: undefined, error_details: undefined } : null);
 
         try {
             const token = localStorage.getItem('token');
-            const response = await fetch(`${import.meta.env.VITE_API_URL || 'https://3.92.236.1'}/projects/${projectId}/deploy/stream`, {
-            // const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/projects/${projectId}/deploy/stream`, {
+            // const response = await fetch(`${import.meta.env.VITE_API_URL || 'https://3.92.236.1'}/projects/${projectId}/deploy/stream`, {
+            const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/projects/${projectId}/deploy/stream`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -225,13 +232,6 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
             const decoder = new TextDecoder();
             let sseBuffer = '';
 
-            // Initial status
-            setStatus(prev => ({
-                ...prev!,
-                status: 'running',
-                logs: ''
-            }));
-
             while (true) {
                 const { value, done } = await reader.read();
                 if (done) break;
@@ -251,20 +251,23 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
                     }
                 }
                 if (newContent) {
-                    setStatus(prev => ({
-                        ...prev!,
-                        logs: (prev?.logs || '') + newContent
-                    }));
+                    // flushSync forces React to render this update immediately
+                    // instead of batching it — required for live log streaming
+                    flushSync(() => {
+                        setLiveLogs(prev => prev + newContent);
+                    });
                 }
             }
 
             // Stream finished - refresh full status to get final state/timestamps
             await fetchStatus();
+            setLiveLogs('');  // switch display to persisted status.logs
             await onStatusChange?.();
 
         } catch (err: any) {
             const detail = err.message || 'Deployment failed';
             setError(detail);
+            setLiveLogs('');
             console.error('Deploy error:', err);
         } finally {
             setDeploying(false);
@@ -527,9 +530,10 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
                     )}
                 </div>
                 <div className="flex-1 overflow-auto bg-[#0d1117] p-4">
-                    {status?.logs ? (
+                    {/* During streaming show liveLogs; afterwards show persisted status.logs */}
+                    {(deploying ? liveLogs : status?.logs) ? (
                         <pre className="text-[11px] leading-[1.8] font-mono whitespace-pre-wrap selection:bg-primary/30">
-                            {status.logs.split('\n').map((line, i) => colorizeLogLine(line, i))}
+                            {(deploying ? liveLogs : status!.logs!).split('\n').map((line, i) => colorizeLogLine(line, i))}
                             <div ref={logEndRef} />
                         </pre>
                     ) : (

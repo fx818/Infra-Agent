@@ -497,6 +497,21 @@ async def deploy_project_stream(
         state_tracker = StateTracker(db)
         combined_logs = ""
 
+        # Build per-user LLM provider for in-loop repair (silently skip if not configured)
+        _deploy_llm = None
+        try:
+            from app.services.ai.base import OpenAICompatibleProvider
+            from app.core.security import decrypt_credentials as _dc_llm
+            _llm_prefs = current_user.llm_preferences or {}
+            if current_user.llm_api_key_encrypted:
+                _deploy_llm = OpenAICompatibleProvider(
+                    api_key=_dc_llm(current_user.llm_api_key_encrypted),
+                    base_url=_llm_prefs.get("base_url"),
+                    model=_llm_prefs.get("model"),
+                )
+        except Exception:
+            pass  # No LLM configured — repair will be skipped silently
+
         flat_configs = Boto3Executor.flatten_configs(boto3_configs)
         flat_configs = _resolve_config_placeholders(flat_configs, safe_name, region)
 
@@ -513,7 +528,7 @@ async def deploy_project_stream(
             try:
                 if payload.action == "apply":
                     log_cb("=== Starting AWS resource provisioning ===")
-                    deployed_resources = await executor.deploy(flat_configs, log_cb)
+                    deployed_resources = await executor.deploy(flat_configs, log_cb, llm=_deploy_llm)
 
                     # Only track resources that were actually created
                     created_resources = [r for r in deployed_resources if r.get("status") == "created"]
@@ -575,6 +590,7 @@ async def deploy_project_stream(
             # SSE format: each message is "data: {line}\n\n"
             # Strip trailing newline from item before wrapping so we don't double-newline
             yield f"data: {item.rstrip()}\n\n"
+            await asyncio.sleep(0)  # yield control so uvicorn flushes this chunk immediately
 
         await task  # ensure cleanup
 

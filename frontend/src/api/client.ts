@@ -1,8 +1,8 @@
 import axios from 'axios';
 
 const api = axios.create({
-    baseURL: 'https://3.92.236.1', // Update if backend runs elsewhere
-    // baseURL: 'http://localhost:8000', // Update if backend runs elsewhere
+    // baseURL: 'https://3.92.236.1', // Update if backend runs elsewhere
+    baseURL: 'http://localhost:8000', // Update if backend runs elsewhere
     headers: {
         'Content-Type': 'application/json',
     },
