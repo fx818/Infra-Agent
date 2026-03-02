@@ -1,4 +1,4 @@
-"""Create EC2 Instance tool."""
+"""Create EC2 Instance tool — provisions via boto3."""
 from typing import Any
 from app.tools.base import BaseTool, ToolResult, ToolNode, ToolNodeConfig
 
@@ -54,54 +54,51 @@ class CreateEC2InstanceTool(BaseTool):
         storage_gb = params.get("storage_gb", 20)
         public_ip = params.get("associate_public_ip", True)
 
-        ami_lookup = {
-            "amazon-linux-2": 'data.aws_ami.amazon_linux_2.id',
-            "ubuntu-22.04": 'data.aws_ami.ubuntu_22_04.id',
+        # For well-known AMI names, we'll resolve at deploy time via SSM
+        ami_ssm_map = {
+            "amazon-linux-2": "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2",
+            "ubuntu-22.04": "/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id",
         }
-        ami_ref = ami_lookup.get(ami, f'"{ami}"')
+        ssm_path = ami_ssm_map.get(ami)
 
-        tf_code = f'''resource "aws_instance" "{iid}" {{
-  ami           = {ami_ref}
-  instance_type = "{instance_type}"
+        configs = []
 
-  root_block_device {{
-    volume_size = {storage_gb}
-    volume_type = "gp3"
-  }}
+        # If using a well-known AMI, resolve via SSM first
+        if ssm_path:
+            configs.append({
+                "service": "ssm",
+                "action": "get_parameter",
+                "params": {"Name": ssm_path},
+                "resource_id_path": "Parameter.Value",
+                "label": f"{label} — AMI Lookup",
+                "resource_type": "ami_lookup",
+                "is_lookup": True,
+            })
 
-  associate_public_ip_address = {str(public_ip).lower()}
-
-  tags = {{
-    Name = join("-", [var.project_name, "{iid}"])
-  }}
-}}
-'''
-
-        if ami in ami_lookup:
-            data_block = ''
-            if ami == "amazon-linux-2":
-                data_block = '''data "aws_ami" "amazon_linux_2" {
-  most_recent = true
-  owners      = ["amazon"]
-
-  filter {
-    name   = "name"
-    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
-  }
-}
-'''
-            elif ami == "ubuntu-22.04":
-                data_block = '''data "aws_ami" "ubuntu_22_04" {
-  most_recent = true
-  owners      = ["099720109477"]
-
-  filter {
-    name   = "name"
-    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
-  }
-}
-'''
-            tf_code = data_block + "\n" + tf_code
+        configs.append({
+            "service": "ec2",
+            "action": "run_instances",
+            "params": {
+                "ImageId": ami if ami not in ami_ssm_map else "__SSM_RESOLVED__",
+                "InstanceType": instance_type,
+                "MinCount": 1,
+                "MaxCount": 1,
+                "BlockDeviceMappings": [{
+                    "DeviceName": "/dev/xvda",
+                    "Ebs": {"VolumeSize": storage_gb, "VolumeType": "gp3"},
+                }],
+                "TagSpecifications": [{
+                    "ResourceType": "instance",
+                    "Tags": [{"Key": "Name", "Value": f"__PROJECT__-{iid}"}],
+                }],
+            },
+            "label": label,
+            "resource_type": "aws_instance",
+            "resource_id_path": "Instances[0].InstanceId",
+            "delete_action": "terminate_instances",
+            "delete_params_key": "InstanceIds",
+            "waiter": "instance_running",
+        })
 
         return ToolResult(
             node=ToolNode(
@@ -113,5 +110,5 @@ class CreateEC2InstanceTool(BaseTool):
                     extra={"ami": ami, "storage_gb": storage_gb},
                 ),
             ),
-            terraform_code={"compute.tf": tf_code},
+            boto3_config={"ec2": configs},
         )

@@ -1,4 +1,4 @@
-"""Create VPC tool."""
+"""Create VPC tool — provisions via boto3."""
 from typing import Any
 from app.tools.base import BaseTool, ToolResult, ToolNode, ToolNodeConfig
 
@@ -25,97 +25,122 @@ class CreateVPCTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         vid = params["vpc_id"]
+        label = params.get("label", vid)
         cidr = params.get("cidr_block", "10.0.0.0/16")
         azs = params.get("availability_zones", 2)
         nat = params.get("enable_nat", True)
 
-        subnet_blocks = []
+        configs = [
+            {
+                "service": "ec2",
+                "action": "create_vpc",
+                "params": {
+                    "CidrBlock": cidr,
+                    "TagSpecifications": [{"ResourceType": "vpc", "Tags": [
+                        {"Key": "Name", "Value": f"__PROJECT__-vpc"},
+                        {"Key": "ManagedBy", "Value": "nl2i"},
+                    ]}],
+                },
+                "label": f"{label} — VPC",
+                "resource_type": "aws_vpc",
+                "resource_id_path": "Vpc.VpcId",
+                "delete_action": "delete_vpc",
+                "delete_params_key": "VpcId",
+                "post_create": [
+                    {"action": "modify_vpc_attribute", "params_template": {"VpcId": "__RESOURCE_ID__", "EnableDnsSupport": {"Value": True}}},
+                    {"action": "modify_vpc_attribute", "params_template": {"VpcId": "__RESOURCE_ID__", "EnableDnsHostnames": {"Value": True}}},
+                ],
+            },
+            {
+                "service": "ec2",
+                "action": "create_internet_gateway",
+                "params": {
+                    "TagSpecifications": [{"ResourceType": "internet-gateway", "Tags": [{"Key": "Name", "Value": f"__PROJECT__-igw"}]}],
+                },
+                "label": f"{label} — Internet Gateway",
+                "resource_type": "aws_internet_gateway",
+                "resource_id_path": "InternetGateway.InternetGatewayId",
+                "delete_action": "delete_internet_gateway",
+                "delete_params_key": "InternetGatewayId",
+                "post_create": [
+                    {"action": "attach_internet_gateway", "params_template": {"InternetGatewayId": "__RESOURCE_ID__", "VpcId": "__VPC_ID__"}},
+                ],
+            },
+        ]
+
+        # Add subnets for each AZ
         for i in range(azs):
-            subnet_blocks.append(f'''
-resource "aws_subnet" "{vid}_public_{i}" {{
-  vpc_id            = aws_vpc.{vid}.id
-  cidr_block        = cidrsubnet(aws_vpc.{vid}.cidr_block, 8, {i})
-  availability_zone = data.aws_availability_zones.available.names[{i}]
-  map_public_ip_on_launch = true
-  tags = {{
-    Name = join("-", [var.project_name, "public", "{i}"])
-  }}
-}}
+            # Calculate CIDR subnets (simple /24 allocation)
+            public_cidr = f"10.0.{i}.0/24"
+            private_cidr = f"10.0.{i + 10}.0/24"
 
-resource "aws_subnet" "{vid}_private_{i}" {{
-  vpc_id            = aws_vpc.{vid}.id
-  cidr_block        = cidrsubnet(aws_vpc.{vid}.cidr_block, 8, {i + 10})
-  availability_zone = data.aws_availability_zones.available.names[{i}]
-  tags = {{
-    Name = join("-", [var.project_name, "private", "{i}"])
-  }}
-}}''')
+            configs.append({
+                "service": "ec2",
+                "action": "create_subnet",
+                "params": {
+                    "VpcId": "__VPC_ID__",
+                    "CidrBlock": public_cidr,
+                    "AvailabilityZone": f"__REGION__{'abcdef'[i]}",
+                    "MapPublicIpOnLaunch": True,
+                    "TagSpecifications": [{"ResourceType": "subnet", "Tags": [{"Key": "Name", "Value": f"__PROJECT__-public-{i}"}]}],
+                },
+                "label": f"{label} — Public Subnet {i}",
+                "resource_type": "aws_subnet",
+                "resource_id_path": "Subnet.SubnetId",
+                "delete_action": "delete_subnet",
+                "delete_params_key": "SubnetId",
+            })
 
-        nat_block = ""
+            configs.append({
+                "service": "ec2",
+                "action": "create_subnet",
+                "params": {
+                    "VpcId": "__VPC_ID__",
+                    "CidrBlock": private_cidr,
+                    "AvailabilityZone": f"__REGION__{'abcdef'[i]}",
+                    "TagSpecifications": [{"ResourceType": "subnet", "Tags": [{"Key": "Name", "Value": f"__PROJECT__-private-{i}"}]}],
+                },
+                "label": f"{label} — Private Subnet {i}",
+                "resource_type": "aws_subnet",
+                "resource_id_path": "Subnet.SubnetId",
+                "delete_action": "delete_subnet",
+                "delete_params_key": "SubnetId",
+            })
+
         if nat:
-            nat_block = f'''
-resource "aws_eip" "{vid}_nat_eip" {{
-  domain = "vpc"
-  tags = {{
-    Name = join("-", [var.project_name, "nat-eip"])
-  }}
-}}
+            configs.extend([
+                {
+                    "service": "ec2",
+                    "action": "allocate_address",
+                    "params": {
+                        "Domain": "vpc",
+                        "TagSpecifications": [{"ResourceType": "elastic-ip", "Tags": [{"Key": "Name", "Value": f"__PROJECT__-nat-eip"}]}],
+                    },
+                    "label": f"{label} — NAT EIP",
+                    "resource_type": "aws_eip",
+                    "resource_id_path": "AllocationId",
+                    "delete_action": "release_address",
+                    "delete_params_key": "AllocationId",
+                },
+                {
+                    "service": "ec2",
+                    "action": "create_nat_gateway",
+                    "params": {
+                        "AllocationId": "__RESOLVE_PREV__",
+                        "SubnetId": "__FIRST_PUBLIC_SUBNET__",
+                        "TagSpecifications": [{"ResourceType": "natgateway", "Tags": [{"Key": "Name", "Value": f"__PROJECT__-nat"}]}],
+                    },
+                    "label": f"{label} — NAT Gateway",
+                    "resource_type": "aws_nat_gateway",
+                    "resource_id_path": "NatGateway.NatGatewayId",
+                    "delete_action": "delete_nat_gateway",
+                    "delete_params_key": "NatGatewayId",
+                    "waiter": "nat_gateway_available",
+                },
+            ])
 
-resource "aws_nat_gateway" "{vid}_nat" {{
-  allocation_id = aws_eip.{vid}_nat_eip.id
-  subnet_id     = aws_subnet.{vid}_public_0.id
-  tags = {{
-    Name = join("-", [var.project_name, "nat"])
-  }}
-}}
-
-resource "aws_route_table" "{vid}_private" {{
-  vpc_id = aws_vpc.{vid}.id
-  route {{
-    cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.{vid}_nat.id
-  }}
-  tags = {{
-    Name = join("-", [var.project_name, "private-rt"])
-  }}
-}}
-'''
-
-        tf_code = f'''data "aws_availability_zones" "available" {{
-  state = "available"
-}}
-
-resource "aws_vpc" "{vid}" {{
-  cidr_block           = "{cidr}"
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-  tags = {{
-    Name = join("-", [var.project_name, "vpc"])
-  }}
-}}
-
-resource "aws_internet_gateway" "{vid}_igw" {{
-  vpc_id = aws_vpc.{vid}.id
-  tags = {{
-    Name = join("-", [var.project_name, "igw"])
-  }}
-}}
-
-resource "aws_route_table" "{vid}_public" {{
-  vpc_id = aws_vpc.{vid}.id
-  route {{
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.{vid}_igw.id
-  }}
-  tags = {{
-    Name = join("-", [var.project_name, "public-rt"])
-  }}
-}}
-{"".join(subnet_blocks)}
-{nat_block}
-'''
         return ToolResult(
-            node=ToolNode(id=vid, type="aws_vpc", label=params.get("label", vid),
+            node=ToolNode(id=vid, type="aws_vpc", label=label,
                           config=ToolNodeConfig(extra={"cidr_block": cidr, "azs": azs, "nat": nat})),
-            terraform_code={"networking.tf": tf_code},
+            boto3_config={"ec2": configs},
         )

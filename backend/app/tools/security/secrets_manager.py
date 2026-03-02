@@ -1,4 +1,5 @@
-"""AWS Secrets Manager tool."""
+"""AWS Secrets Manager tool — provisions via boto3."""
+import json
 from typing import Any
 from app.tools.base import BaseTool, ToolResult, ToolNode, ToolNodeConfig
 
@@ -25,36 +26,30 @@ class CreateSecretsManagerTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         sid = params["secret_id"]
-        secret_name = params.get("secret_name") or f"${{var.project_name}}/{sid}"
+        label = params.get("label", sid)
+        secret_name = params.get("secret_name") or f"__PROJECT__/{sid}"
         desc = params.get("description", "Application secret")
-        enable_rotation = params.get("enable_rotation", False)
-        rotation_days = params.get("rotation_days", 30)
 
-        rotation_block = f'''
-resource "aws_secretsmanager_secret_rotation" "{sid}_rotation" {{
-  secret_id           = aws_secretsmanager_secret.{sid}.id
-  rotation_lambda_arn = ""  # Add your rotation Lambda ARN here
-  rotation_rules {{
-    automatically_after_days = {rotation_days}
-  }}
-}}''' if enable_rotation else ""
+        configs = [
+            {
+                "service": "secretsmanager",
+                "action": "create_secret",
+                "params": {
+                    "Name": secret_name,
+                    "Description": desc,
+                    "SecretString": json.dumps({"placeholder": "replace-with-actual-secret"}),
+                    "Tags": [{"Key": "Name", "Value": f"__PROJECT__-{sid}"}],
+                },
+                "label": label,
+                "resource_type": "aws_secrets_manager",
+                "resource_id_path": "ARN",
+                "delete_action": "delete_secret",
+                "delete_params": {"SecretId": secret_name, "RecoveryWindowInDays": 7},
+            },
+        ]
 
-        tf_code = f'''
-resource "aws_secretsmanager_secret" "{sid}" {{
-  name        = "{secret_name}"
-  description = "{desc}"
-  recovery_window_in_days = 7
-  tags        = {{ Name = "${{var.project_name}}-{sid}" }}
-}}
-
-resource "aws_secretsmanager_secret_version" "{sid}_value" {{
-  secret_id     = aws_secretsmanager_secret.{sid}.id
-  secret_string = jsonencode({{ placeholder = "replace-with-actual-secret" }})
-}}
-{rotation_block}
-'''
         return ToolResult(
-            node=ToolNode(id=sid, type="aws_secrets_manager", label=params.get("label", sid),
-                          config=ToolNodeConfig(extra={"rotation": enable_rotation})),
-            terraform_code={"security.tf": tf_code},
+            node=ToolNode(id=sid, type="aws_secrets_manager", label=label,
+                          config=ToolNodeConfig(extra={"rotation": params.get("enable_rotation", False)})),
+            boto3_config={"secretsmanager": configs},
         )

@@ -1,5 +1,5 @@
 """
-Deployment / TerraformRun ORM model.
+Deployment ORM model — tracks infrastructure deployment runs.
 """
 
 import datetime
@@ -20,6 +20,8 @@ class Deployment(Base):
     status: Mapped[str] = mapped_column(String(30), default="pending")  # pending, running, success, failed, partial_deployed, destroyed
     logs: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_details: Mapped[str | None] = mapped_column(Text, nullable=True)  # Detailed error classification
+    resource_state_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON list of deployed resource records
 
     started_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

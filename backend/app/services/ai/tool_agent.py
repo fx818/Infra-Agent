@@ -4,7 +4,7 @@ Tool Agent — orchestrates LLM tool-calling to build AWS architectures.
 Replaces the previous pipeline of IntentAgent → ArchitectureAgent → TerraformAgent
 with a single agent that uses tool calling. The LLM decides which AWS services
 to provision by calling tools, and this agent assembles the results into
-an ArchitectureGraph + TerraformFileMap.
+an ArchitectureGraph + boto3 deployment configs.
 """
 
 import json
@@ -16,7 +16,6 @@ from app.schemas.architecture import (
     ArchitectureEdge,
     ArchitectureGraph,
     ArchitectureNode,
-    TerraformFileMap,
 )
 from app.services.ai.base import BaseLLMProvider
 from app.tools.registry import ToolRegistry
@@ -44,7 +43,7 @@ class ToolAgent:
         # Accumulated state during one run
         self._nodes: list[dict[str, Any]] = []
         self._edges: list[dict[str, Any]] = []
-        self._terraform_files: dict[str, str] = {}
+        self._boto3_configs: dict[str, list[dict[str, Any]]] = {}
 
     async def run(
         self,
@@ -61,7 +60,7 @@ class ToolAgent:
             project_name: Project name for resource naming.
 
         Returns:
-            Dict with "graph" (ArchitectureGraph), "terraform" (TerraformFileMap),
+            Dict with "graph" (ArchitectureGraph), "boto3_configs" (dict of service → ops),
             and "summary" (LLM's explanation of the architecture).
         """
         logger.info("ToolAgent: starting for project=%s, region=%s", project_name, region)
@@ -69,7 +68,7 @@ class ToolAgent:
         # Reset state
         self._nodes = []
         self._edges = []
-        self._terraform_files = {}
+        self._boto3_configs = {}
 
         # Sanitize project name
         safe_name = project_name.lower().replace(" ", "-").replace("_", "-")
@@ -99,21 +98,17 @@ class ToolAgent:
             temperature=0.2,
         )
 
-        # Add provider/region terraform boilerplate
-        self._terraform_files["providers.tf"] = self._generate_provider_tf(region, safe_name)
-
         # Build the final graph
         graph = self._build_graph()
-        terraform = TerraformFileMap(files=self._terraform_files)
 
         logger.info(
-            "ToolAgent: complete — %d nodes, %d edges, %d terraform files",
-            len(graph.nodes), len(graph.edges), len(terraform.files),
+            "ToolAgent: complete — %d nodes, %d edges, %d boto3 service groups",
+            len(graph.nodes), len(graph.edges), len(self._boto3_configs),
         )
 
         return {
             "graph": graph,
-            "terraform": terraform,
+            "boto3_configs": self._boto3_configs,
             "summary": result.get("message", ""),
             "tool_calls_count": len(result.get("tool_calls", [])),
         }
@@ -135,12 +130,11 @@ class ToolAgent:
             for edge in result.edges:
                 self._edges.append(edge)
 
-            # Merge terraform code
-            for filename, code in result.terraform_code.items():
-                if filename in self._terraform_files:
-                    self._terraform_files[filename] += "\n" + code
-                else:
-                    self._terraform_files[filename] = code
+            # Merge boto3 configs
+            for service, ops in result.boto3_config.items():
+                if service not in self._boto3_configs:
+                    self._boto3_configs[service] = []
+                self._boto3_configs[service].extend(ops)
 
             return json.dumps({
                 "status": "success",
@@ -178,42 +172,4 @@ class ToolAgent:
 
         return ArchitectureGraph(nodes=nodes, edges=edges)
 
-    @staticmethod
-    def _generate_provider_tf(region: str, project_name: str) -> str:
-        """Generate the Terraform provider and variable definitions."""
-        return f'''terraform {{
-  required_version = ">= 1.0"
-  required_providers {{
-    aws = {{
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }}
-  }}
-}}
 
-provider "aws" {{
-  region = var.region
-}}
-
-variable "region" {{
-  type    = string
-  default = "{region}"
-}}
-
-variable "project_name" {{
-  type    = string
-  default = "{project_name}"
-}}
-
-variable "db_password" {{
-  type      = string
-  sensitive = true
-  default   = "ChangeMe123!"
-  description = "Master password for database resources. Change this before applying in production."
-}}
-
-variable "environment" {{
-  type    = string
-  default = "dev"
-}}
-'''

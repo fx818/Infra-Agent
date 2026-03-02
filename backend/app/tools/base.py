@@ -52,19 +52,21 @@ class ToolResult:
 
     Attributes:
         node: The architecture node created by the tool.
-        terraform_code: Dict mapping filename → Terraform HCL snippet.
+        boto3_config: Dict mapping AWS service → list of boto3 API call configs.
+                      Each config: {"action": "run_instances", "params": {...},
+                      "delete_action": "terminate_instances", ...}
         edges: Optional list of edges the tool suggests.
         metadata: Any extra information (e.g. tags, notes).
     """
     node: ToolNode
-    terraform_code: dict[str, str] = field(default_factory=dict)
+    boto3_config: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     edges: list[dict[str, str]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "node": self.node.model_dump(by_alias=True),
-            "terraform_code": self.terraform_code,
+            "boto3_config": self.boto3_config,
             "edges": self.edges,
             "metadata": self.metadata,
         }

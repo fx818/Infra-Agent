@@ -1,4 +1,4 @@
-"""Create Aurora, DynamoDB, Redshift, ElastiCache, Neptune, DocumentDB, Keyspaces, Timestream tools."""
+"""Database tools: Aurora, DynamoDB, Redshift, ElastiCache, Neptune, DocumentDB, Keyspaces, Timestream — provisions via boto3."""
 from typing import Any
 from app.tools.base import BaseTool, ToolResult, ToolNode, ToolNodeConfig
 
@@ -20,79 +20,61 @@ class CreateAuroraClusterTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         cid = params["cluster_id"]
-        safe_cid = cid.lower().replace("_", "-")
+        label = params.get("label", cid)
         raw_engine = params.get("engine", "aurora-postgresql")
         inst_class = params.get("instance_class", "db.r5.large")
         inst_count = params.get("instances", 2)
 
-        # Auto-correct engine: LLM sometimes passes 'postgres' or 'mysql' directly
-        engine_map = {
-            "postgres": "aurora-postgresql",
-            "postgresql": "aurora-postgresql",
-            "mysql": "aurora-mysql",
-        }
+        engine_map = {"postgres": "aurora-postgresql", "postgresql": "aurora-postgresql", "mysql": "aurora-mysql"}
         engine = engine_map.get(raw_engine.lower(), raw_engine)
         if engine not in ("aurora-mysql", "aurora-postgresql"):
-            engine = "aurora-postgresql"  # safe default
+            engine = "aurora-postgresql"
 
-        tf_code = f'''# --- Networking for Aurora (dedicated subnets in separate VPC) ---
-data "aws_availability_zones" "aurora_azs" {{
-  state = "available"
-}}
+        safe_cid = cid.lower().replace("_", "-")
 
-resource "aws_vpc" "{cid}_vpc" {{
-  cidr_block           = "10.200.0.0/16"
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-  tags = {{ Name = join("-", [var.project_name, "{safe_cid}", "vpc"]) }}
-}}
+        configs = [
+            {
+                "service": "rds",
+                "action": "create_db_cluster",
+                "params": {
+                    "DBClusterIdentifier": f"__PROJECT__-{safe_cid}",
+                    "Engine": engine,
+                    "MasterUsername": "dbadmin",
+                    "MasterUserPassword": "ChangeMe123!",
+                    "StorageEncrypted": True,
+                    "Tags": [{"Key": "Name", "Value": f"__PROJECT__-{safe_cid}"}],
+                },
+                "label": f"{label} — Cluster",
+                "resource_type": "aws_aurora_cluster",
+                "resource_id_path": "DBCluster.DBClusterIdentifier",
+                "delete_action": "delete_db_cluster",
+                "delete_params": {"DBClusterIdentifier": f"__PROJECT__-{safe_cid}", "SkipFinalSnapshot": True},
+                "waiter": "db_cluster_available",
+                "waiter_params": {"DBClusterIdentifier": f"__PROJECT__-{safe_cid}"},
+            },
+        ]
 
-resource "aws_subnet" "{cid}_subnet_a" {{
-  vpc_id            = aws_vpc.{cid}_vpc.id
-  cidr_block        = "10.200.1.0/24"
-  availability_zone = data.aws_availability_zones.aurora_azs.names[0]
-  tags = {{ Name = join("-", [var.project_name, "{safe_cid}", "subnet-a"]) }}
-}}
+        for i in range(inst_count):
+            configs.append({
+                "service": "rds",
+                "action": "create_db_instance",
+                "params": {
+                    "DBInstanceIdentifier": f"__PROJECT__-{safe_cid}-{i}",
+                    "DBClusterIdentifier": f"__PROJECT__-{safe_cid}",
+                    "DBInstanceClass": inst_class,
+                    "Engine": engine,
+                },
+                "label": f"{label} — Instance {i}",
+                "resource_type": "aws_aurora_instance",
+                "resource_id_path": "DBInstance.DBInstanceIdentifier",
+                "delete_action": "delete_db_instance",
+                "delete_params": {"DBInstanceIdentifier": f"__PROJECT__-{safe_cid}-{i}", "SkipFinalSnapshot": True},
+            })
 
-resource "aws_subnet" "{cid}_subnet_b" {{
-  vpc_id            = aws_vpc.{cid}_vpc.id
-  cidr_block        = "10.200.2.0/24"
-  availability_zone = data.aws_availability_zones.aurora_azs.names[1]
-  tags = {{ Name = join("-", [var.project_name, "{safe_cid}", "subnet-b"]) }}
-}}
-
-resource "aws_db_subnet_group" "{cid}_subnet_group" {{
-  name       = join("-", [var.project_name, "{safe_cid}", "sg"])
-  subnet_ids = [aws_subnet.{cid}_subnet_a.id, aws_subnet.{cid}_subnet_b.id]
-  tags = {{ Name = join("-", [var.project_name, "{safe_cid}", "subnet-group"]) }}
-}}
-
-# --- Aurora Cluster ---
-resource "aws_rds_cluster" "{cid}" {{
-  cluster_identifier  = join("-", [var.project_name, "{safe_cid}"])
-  engine              = "{engine}"
-  master_username     = "dbadmin"
-  master_password     = var.db_password
-  db_subnet_group_name = aws_db_subnet_group.{cid}_subnet_group.name
-  skip_final_snapshot = true
-  storage_encrypted   = true
-  tags = {{
-    Name = join("-", [var.project_name, "{safe_cid}"])
-  }}
-}}
-
-resource "aws_rds_cluster_instance" "{cid}_instances" {{
-  count              = {inst_count}
-  identifier         = join("-", [var.project_name, "{safe_cid}", tostring(count.index)])
-  cluster_identifier = aws_rds_cluster.{cid}.id
-  instance_class     = "{inst_class}"
-  engine             = aws_rds_cluster.{cid}.engine
-}}
-'''
         return ToolResult(
-            node=ToolNode(id=cid, type="aws_aurora", label=params.get("label", cid),
+            node=ToolNode(id=cid, type="aws_aurora", label=label,
                           config=ToolNodeConfig(engine=engine, instance_type=inst_class)),
-            terraform_code={"database.tf": tf_code},
+            boto3_config={"rds": configs},
         )
 
 
@@ -114,34 +96,46 @@ class CreateDynamoDBTableTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         tid = params["table_id"]
+        label = params.get("label", tid)
         hk = params.get("hash_key", "id")
-        range_attr = ""
-        if params.get("range_key"):
-            range_attr = f'''
-  range_key = "{params['range_key']}"
-  attribute {{
-    name = "{params['range_key']}"
-    type = "S"
-  }}'''
-        tf_code = f'''resource "aws_dynamodb_table" "{tid}" {{
-  name         = join("-", [var.project_name, "{tid}"])
-  billing_mode = "{params.get('billing_mode', 'PAY_PER_REQUEST')}"
-  hash_key     = "{hk}"
-{range_attr}
-  attribute {{
-    name = "{hk}"
-    type = "{params.get('hash_key_type', 'S')}"
-  }}
+        hk_type = params.get("hash_key_type", "S")
+        billing = params.get("billing_mode", "PAY_PER_REQUEST")
 
-  tags = {{
-    Name = join("-", [var.project_name, "{tid}"])
-  }}
-}}
-'''
+        key_schema = [{"AttributeName": hk, "KeyType": "HASH"}]
+        attr_defs = [{"AttributeName": hk, "AttributeType": hk_type}]
+
+        if params.get("range_key"):
+            rk = params["range_key"]
+            key_schema.append({"AttributeName": rk, "KeyType": "RANGE"})
+            attr_defs.append({"AttributeName": rk, "AttributeType": "S"})
+
+        create_params = {
+            "TableName": f"__PROJECT__-{tid}",
+            "KeySchema": key_schema,
+            "AttributeDefinitions": attr_defs,
+            "BillingMode": billing,
+            "Tags": [{"Key": "Name", "Value": f"__PROJECT__-{tid}"}],
+        }
+
+        if billing == "PROVISIONED":
+            create_params["ProvisionedThroughput"] = {"ReadCapacityUnits": 5, "WriteCapacityUnits": 5}
+
+        configs = [{
+            "service": "dynamodb",
+            "action": "create_table",
+            "params": create_params,
+            "label": label,
+            "resource_type": "aws_dynamodb",
+            "resource_id_path": "TableDescription.TableArn",
+            "delete_action": "delete_table",
+            "delete_params": {"TableName": f"__PROJECT__-{tid}"},
+            "waiter": "table_exists",
+            "waiter_params": {"TableName": f"__PROJECT__-{tid}"},
+        }]
         return ToolResult(
-            node=ToolNode(id=tid, type="aws_dynamodb", label=params.get("label", tid),
-                          config=ToolNodeConfig(extra={"hash_key": hk, "billing_mode": params.get("billing_mode", "PAY_PER_REQUEST")})),
-            terraform_code={"database.tf": tf_code},
+            node=ToolNode(id=tid, type="aws_dynamodb", label=label,
+                          config=ToolNodeConfig(extra={"hash_key": hk, "billing_mode": billing})),
+            boto3_config={"dynamodb": configs},
         )
 
 
@@ -162,23 +156,31 @@ class CreateRedshiftClusterTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         cid = params["cluster_id"]
-        tf_code = f'''resource "aws_redshift_cluster" "{cid}" {{
-  cluster_identifier = join("-", [var.project_name, "{cid}"])
-  database_name      = "{params.get('db_name', 'analytics')}"
-  master_username    = "admin"
-  master_password    = var.db_password
-  node_type          = "{params.get('node_type', 'dc2.large')}"
-  number_of_nodes    = {params.get('number_of_nodes', 2)}
-  skip_final_snapshot = true
-  tags = {{
-    Name = join("-", [var.project_name, "{cid}"])
-  }}
-}}
-'''
+        label = params.get("label", cid)
+        configs = [{
+            "service": "redshift",
+            "action": "create_cluster",
+            "params": {
+                "ClusterIdentifier": f"__PROJECT__-{cid}",
+                "NodeType": params.get("node_type", "dc2.large"),
+                "NumberOfNodes": params.get("number_of_nodes", 2),
+                "DBName": params.get("db_name", "analytics"),
+                "MasterUsername": "admin",
+                "MasterUserPassword": "ChangeMe123!",
+                "Tags": [{"Key": "Name", "Value": f"__PROJECT__-{cid}"}],
+            },
+            "label": label,
+            "resource_type": "aws_redshift",
+            "resource_id_path": "Cluster.ClusterIdentifier",
+            "delete_action": "delete_cluster",
+            "delete_params": {"ClusterIdentifier": f"__PROJECT__-{cid}", "SkipFinalClusterSnapshot": True},
+            "waiter": "cluster_available",
+            "waiter_params": {"ClusterIdentifier": f"__PROJECT__-{cid}"},
+        }]
         return ToolResult(
-            node=ToolNode(id=cid, type="aws_redshift", label=params.get("label", cid),
+            node=ToolNode(id=cid, type="aws_redshift", label=label,
                           config=ToolNodeConfig(instance_type=params.get("node_type", "dc2.large"))),
-            terraform_code={"database.tf": tf_code},
+            boto3_config={"redshift": configs},
         )
 
 
@@ -199,22 +201,32 @@ class CreateElastiCacheClusterTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         cid = params["cache_id"]
+        label = params.get("label", cid)
         engine = params.get("engine", "redis")
-        tf_code = f'''resource "aws_elasticache_cluster" "{cid}" {{
-  cluster_id      = join("-", [var.project_name, "{cid}"])
-  engine          = "{engine}"
-  node_type       = "{params.get('node_type', 'cache.t3.micro')}"
-  num_cache_nodes = {params.get('num_cache_nodes', 1)}
-  port            = {6379 if engine == 'redis' else 11211}
-  tags = {{
-    Name = join("-", [var.project_name, "{cid}"])
-  }}
-}}
-'''
+        safe_cid = cid.lower().replace("_", "-")
+        configs = [{
+            "service": "elasticache",
+            "action": "create_cache_cluster",
+            "params": {
+                "CacheClusterId": f"__PROJECT__-{safe_cid}",
+                "Engine": engine,
+                "CacheNodeType": params.get("node_type", "cache.t3.micro"),
+                "NumCacheNodes": params.get("num_cache_nodes", 1),
+                "Port": 6379 if engine == "redis" else 11211,
+                "Tags": [{"Key": "Name", "Value": f"__PROJECT__-{safe_cid}"}],
+            },
+            "label": label,
+            "resource_type": "aws_elasticache",
+            "resource_id_path": "CacheCluster.CacheClusterId",
+            "delete_action": "delete_cache_cluster",
+            "delete_params": {"CacheClusterId": f"__PROJECT__-{safe_cid}"},
+            "waiter": "cache_cluster_available",
+            "waiter_params": {"CacheClusterId": f"__PROJECT__-{safe_cid}"},
+        }]
         return ToolResult(
-            node=ToolNode(id=cid, type="aws_elasticache", label=params.get("label", cid),
+            node=ToolNode(id=cid, type="aws_elasticache", label=label,
                           config=ToolNodeConfig(engine=engine, instance_type=params.get("node_type", "cache.t3.micro"))),
-            terraform_code={"database.tf": tf_code},
+            boto3_config={"elasticache": configs},
         )
 
 
@@ -233,23 +245,43 @@ class CreateNeptuneClusterTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         nid = params["neptune_id"]
-        tf_code = f'''resource "aws_neptune_cluster" "{nid}" {{
-  cluster_identifier  = join("-", [var.project_name, "{nid}"])
-  skip_final_snapshot = true
-  tags = {{
-    Name = join("-", [var.project_name, "{nid}"])
-  }}
-}}
-
-resource "aws_neptune_cluster_instance" "{nid}_instance" {{
-  cluster_identifier = aws_neptune_cluster.{nid}.id
-  instance_class     = "{params.get('instance_class', 'db.r5.large')}"
-}}
-'''
+        label = params.get("label", nid)
+        safe_nid = nid.lower().replace("_", "-")
+        configs = [
+            {
+                "service": "neptune",
+                "action": "create_db_cluster",
+                "params": {
+                    "DBClusterIdentifier": f"__PROJECT__-{safe_nid}",
+                    "Engine": "neptune",
+                    "Tags": [{"Key": "Name", "Value": f"__PROJECT__-{safe_nid}"}],
+                },
+                "label": f"{label} — Cluster",
+                "resource_type": "aws_neptune_cluster",
+                "resource_id_path": "DBCluster.DBClusterIdentifier",
+                "delete_action": "delete_db_cluster",
+                "delete_params": {"DBClusterIdentifier": f"__PROJECT__-{safe_nid}", "SkipFinalSnapshot": True},
+            },
+            {
+                "service": "neptune",
+                "action": "create_db_instance",
+                "params": {
+                    "DBInstanceIdentifier": f"__PROJECT__-{safe_nid}-0",
+                    "DBClusterIdentifier": f"__PROJECT__-{safe_nid}",
+                    "DBInstanceClass": params.get("instance_class", "db.r5.large"),
+                    "Engine": "neptune",
+                },
+                "label": f"{label} — Instance",
+                "resource_type": "aws_neptune_instance",
+                "resource_id_path": "DBInstance.DBInstanceIdentifier",
+                "delete_action": "delete_db_instance",
+                "delete_params": {"DBInstanceIdentifier": f"__PROJECT__-{safe_nid}-0"},
+            },
+        ]
         return ToolResult(
-            node=ToolNode(id=nid, type="aws_neptune", label=params.get("label", nid),
+            node=ToolNode(id=nid, type="aws_neptune", label=label,
                           config=ToolNodeConfig(engine="neptune", instance_type=params.get("instance_class", "db.r5.large"))),
-            terraform_code={"database.tf": tf_code},
+            boto3_config={"neptune": configs},
         )
 
 
@@ -269,27 +301,48 @@ class CreateDocumentDBClusterTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         did = params["docdb_id"]
-        tf_code = f'''resource "aws_docdb_cluster" "{did}" {{
-  cluster_identifier  = join("-", [var.project_name, "{did}"])
-  master_username     = "admin"
-  master_password     = var.db_password
-  skip_final_snapshot = true
-  tags = {{
-    Name = join("-", [var.project_name, "{did}"])
-  }}
-}}
+        label = params.get("label", did)
+        safe_did = did.lower().replace("_", "-")
+        inst_count = params.get("instances", 2)
 
-resource "aws_docdb_cluster_instance" "{did}_instances" {{
-  count              = {params.get('instances', 2)}
-  identifier         = join("-", [var.project_name, "{did}", tostring(count.index)])
-  cluster_identifier = aws_docdb_cluster.{did}.id
-  instance_class     = "{params.get('instance_class', 'db.r5.large')}"
-}}
-'''
+        configs = [{
+            "service": "docdb",
+            "action": "create_db_cluster",
+            "params": {
+                "DBClusterIdentifier": f"__PROJECT__-{safe_did}",
+                "Engine": "docdb",
+                "MasterUsername": "admin",
+                "MasterUserPassword": "ChangeMe123!",
+                "Tags": [{"Key": "Name", "Value": f"__PROJECT__-{safe_did}"}],
+            },
+            "label": f"{label} — Cluster",
+            "resource_type": "aws_documentdb_cluster",
+            "resource_id_path": "DBCluster.DBClusterIdentifier",
+            "delete_action": "delete_db_cluster",
+            "delete_params": {"DBClusterIdentifier": f"__PROJECT__-{safe_did}", "SkipFinalSnapshot": True},
+        }]
+
+        for i in range(inst_count):
+            configs.append({
+                "service": "docdb",
+                "action": "create_db_instance",
+                "params": {
+                    "DBInstanceIdentifier": f"__PROJECT__-{safe_did}-{i}",
+                    "DBClusterIdentifier": f"__PROJECT__-{safe_did}",
+                    "DBInstanceClass": params.get("instance_class", "db.r5.large"),
+                    "Engine": "docdb",
+                },
+                "label": f"{label} — Instance {i}",
+                "resource_type": "aws_documentdb_instance",
+                "resource_id_path": "DBInstance.DBInstanceIdentifier",
+                "delete_action": "delete_db_instance",
+                "delete_params": {"DBInstanceIdentifier": f"__PROJECT__-{safe_did}-{i}"},
+            })
+
         return ToolResult(
-            node=ToolNode(id=did, type="aws_documentdb", label=params.get("label", did),
+            node=ToolNode(id=did, type="aws_documentdb", label=label,
                           config=ToolNodeConfig(engine="documentdb", instance_type=params.get("instance_class", "db.r5.large"))),
-            terraform_code={"database.tf": tf_code},
+            boto3_config={"docdb": configs},
         )
 
 
@@ -309,22 +362,44 @@ class CreateKeyspacesTableTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         kid = params["ks_id"]
-        tf_code = f'''resource "aws_keyspaces_keyspace" "{kid}_ks" {{
-  name = "{params.get('keyspace_name', 'app_keyspace')}"
-}}
-
-resource "aws_keyspaces_table" "{kid}" {{
-  keyspace_name = aws_keyspaces_keyspace.{kid}_ks.name
-  table_name    = "{params.get('table_name', 'data')}"
-  schema_definition {{
-    column {{ name = "id" type = "text" }}
-    partition_key {{ name = "id" }}
-  }}
-}}
-'''
+        label = params.get("label", kid)
+        ks_name = params.get("keyspace_name", "app_keyspace")
+        tbl_name = params.get("table_name", "data")
+        configs = [
+            {
+                "service": "keyspaces",
+                "action": "create_keyspace",
+                "params": {
+                    "keyspaceName": ks_name,
+                    "tags": [{"key": "Name", "value": f"__PROJECT__-{kid}"}],
+                },
+                "label": f"{label} — Keyspace",
+                "resource_type": "aws_keyspaces_keyspace",
+                "resource_id_path": "resourceArn",
+                "delete_action": "delete_keyspace",
+                "delete_params": {"keyspaceName": ks_name},
+            },
+            {
+                "service": "keyspaces",
+                "action": "create_table",
+                "params": {
+                    "keyspaceName": ks_name,
+                    "tableName": tbl_name,
+                    "schemaDefinition": {
+                        "allColumns": [{"name": "id", "type": "text"}],
+                        "partitionKeys": [{"name": "id"}],
+                    },
+                },
+                "label": label,
+                "resource_type": "aws_keyspaces_table",
+                "resource_id_path": "resourceArn",
+                "delete_action": "delete_table",
+                "delete_params": {"keyspaceName": ks_name, "tableName": tbl_name},
+            },
+        ]
         return ToolResult(
-            node=ToolNode(id=kid, type="aws_keyspaces", label=params.get("label", kid), config=ToolNodeConfig(engine="cassandra")),
-            terraform_code={"database.tf": tf_code},
+            node=ToolNode(id=kid, type="aws_keyspaces", label=label, config=ToolNodeConfig(engine="cassandra")),
+            boto3_config={"keyspaces": configs},
         )
 
 
@@ -345,23 +420,40 @@ class CreateTimestreamDatabaseTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         tid = params["ts_id"]
-        tf_code = f'''resource "aws_timestreamwrite_database" "{tid}" {{
-  database_name = join("-", [var.project_name, "{tid}"])
-  tags = {{
-    Name = join("-", [var.project_name, "{tid}"])
-  }}
-}}
-
-resource "aws_timestreamwrite_table" "{tid}_table" {{
-  database_name = aws_timestreamwrite_database.{tid}.database_name
-  table_name    = "{params.get('table_name', 'metrics')}"
-  retention_properties {{
-    memory_store_retention_period_in_hours  = {params.get('retention_hours', 24)}
-    magnetic_store_retention_period_in_days = {params.get('retention_days', 365)}
-  }}
-}}
-'''
+        label = params.get("label", tid)
+        configs = [
+            {
+                "service": "timestream-write",
+                "action": "create_database",
+                "params": {
+                    "DatabaseName": f"__PROJECT__-{tid}",
+                    "Tags": [{"Key": "Name", "Value": f"__PROJECT__-{tid}"}],
+                },
+                "label": f"{label} — Database",
+                "resource_type": "aws_timestream_database",
+                "resource_id_path": "Database.Arn",
+                "delete_action": "delete_database",
+                "delete_params": {"DatabaseName": f"__PROJECT__-{tid}"},
+            },
+            {
+                "service": "timestream-write",
+                "action": "create_table",
+                "params": {
+                    "DatabaseName": f"__PROJECT__-{tid}",
+                    "TableName": params.get("table_name", "metrics"),
+                    "RetentionProperties": {
+                        "MemoryStoreRetentionPeriodInHours": params.get("retention_hours", 24),
+                        "MagneticStoreRetentionPeriodInDays": params.get("retention_days", 365),
+                    },
+                },
+                "label": label,
+                "resource_type": "aws_timestream_table",
+                "resource_id_path": "Table.Arn",
+                "delete_action": "delete_table",
+                "delete_params": {"DatabaseName": f"__PROJECT__-{tid}", "TableName": params.get("table_name", "metrics")},
+            },
+        ]
         return ToolResult(
-            node=ToolNode(id=tid, type="aws_timestream", label=params.get("label", tid), config=ToolNodeConfig(engine="timestream")),
-            terraform_code={"database.tf": tf_code},
+            node=ToolNode(id=tid, type="aws_timestream", label=label, config=ToolNodeConfig(engine="timestream")),
+            boto3_config={"timestream-write": configs},
         )

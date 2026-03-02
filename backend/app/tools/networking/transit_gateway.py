@@ -1,4 +1,4 @@
-"""AWS Transit Gateway tool."""
+"""AWS Transit Gateway tool — provisions via boto3."""
 from typing import Any
 from app.tools.base import BaseTool, ToolResult, ToolNode, ToolNodeConfig
 
@@ -23,21 +23,32 @@ class CreateTransitGatewayTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         tid = params["tgw_id"]
+        label = params.get("label", tid)
         asn = params.get("amazon_side_asn", 64512)
         desc = params.get("description", "Transit Gateway")
 
-        tf_code = f'''
-resource "aws_ec2_transit_gateway" "{tid}" {{
-  description                     = "{desc}"
-  amazon_side_asn                 = {asn}
-  auto_accept_shared_attachments  = "enable"
-  default_route_table_association = "enable"
-  default_route_table_propagation = "enable"
-  tags = {{ Name = "${{var.project_name}}-tgw" }}
-}}
-'''
+        configs = [{
+            "service": "ec2",
+            "action": "create_transit_gateway",
+            "params": {
+                "Description": desc,
+                "Options": {
+                    "AmazonSideAsn": asn,
+                    "AutoAcceptSharedAttachments": "enable",
+                    "DefaultRouteTableAssociation": "enable",
+                    "DefaultRouteTablePropagation": "enable",
+                },
+                "TagSpecifications": [{"ResourceType": "transit-gateway", "Tags": [{"Key": "Name", "Value": f"__PROJECT__-tgw"}]}],
+            },
+            "label": label,
+            "resource_type": "aws_transit_gateway",
+            "resource_id_path": "TransitGateway.TransitGatewayId",
+            "delete_action": "delete_transit_gateway",
+            "delete_params_key": "TransitGatewayId",
+        }]
+
         return ToolResult(
-            node=ToolNode(id=tid, type="aws_transit_gateway", label=params.get("label", tid),
+            node=ToolNode(id=tid, type="aws_transit_gateway", label=label,
                           config=ToolNodeConfig(extra={"asn": asn})),
-            terraform_code={"networking.tf": tf_code},
+            boto3_config={"ec2": configs},
         )

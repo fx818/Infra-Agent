@@ -1,4 +1,4 @@
-"""AWS Kinesis Data Streams tool."""
+"""AWS Kinesis Data Streams tool — provisions via boto3."""
 from typing import Any
 from app.tools.base import BaseTool, ToolResult, ToolNode, ToolNodeConfig
 
@@ -23,24 +23,30 @@ class CreateKinesisStreamTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         sid = params["stream_id"]
+        label = params.get("label", sid)
         shards = params.get("shard_count", 1)
         retention = params.get("retention_period_hours", 24)
 
-        tf_code = f'''
-resource "aws_kinesis_stream" "{sid}" {{
-  name             = "${{var.project_name}}-{sid}"
-  shard_count      = {shards}
-  retention_period = {retention}
+        configs = [{
+            "service": "kinesis",
+            "action": "create_stream",
+            "params": {
+                "StreamName": f"__PROJECT__-{sid}",
+                "ShardCount": shards,
+                "StreamModeDetails": {"StreamMode": "PROVISIONED"},
+                "Tags": {"Name": f"__PROJECT__-{sid}"},
+            },
+            "label": label,
+            "resource_type": "aws_kinesis",
+            "resource_id_path": None,
+            "delete_action": "delete_stream",
+            "delete_params": {"StreamName": f"__PROJECT__-{sid}", "EnforceConsumerDeletion": True},
+            "waiter": "stream_exists",
+            "waiter_params": {"StreamName": f"__PROJECT__-{sid}"},
+        }]
 
-  stream_mode_details {{
-    stream_mode = "PROVISIONED"
-  }}
-
-  tags = {{ Name = "${{var.project_name}}-{sid}" }}
-}}
-'''
         return ToolResult(
-            node=ToolNode(id=sid, type="aws_kinesis", label=params.get("label", sid),
+            node=ToolNode(id=sid, type="aws_kinesis", label=label,
                           config=ToolNodeConfig(extra={"shards": shards, "retention_hours": retention})),
-            terraform_code={"messaging.tf": tf_code},
+            boto3_config={"kinesis": configs},
         )

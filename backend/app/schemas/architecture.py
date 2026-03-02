@@ -54,12 +54,19 @@ class ArchitectureGraph(BaseModel):
     edges: list[ArchitectureEdge] = Field(default_factory=list)
 
 
-class TerraformFileMap(BaseModel):
-    """Map of Terraform file names to their contents."""
-    files: dict[str, str] = Field(
+class Boto3ConfigMap(BaseModel):
+    """Map of boto3 deployment configurations.
+
+    Stores boto3 API call configs organized by service name → list of API call dicts.
+    Backward-compatible: the DB column is still called terraform_files_json.
+    """
+    files: dict[str, Any] = Field(
         default_factory=dict,
-        description="Map of filename → file content, e.g. {'main.tf': '...'}"
+        description="Map of service name → list of boto3 API call configs."
     )
+
+# Backward-compatible alias
+TerraformFileMap = Boto3ConfigMap
 
 
 class ArchitectureResponse(BaseModel):
@@ -69,7 +76,7 @@ class ArchitectureResponse(BaseModel):
     version: int
     intent: IntentOutput | None = None
     graph: ArchitectureGraph
-    terraform_files: TerraformFileMap | None = None
+    terraform_files: Boto3ConfigMap | None = None
     cost: "CostEstimate | None" = None
     visual: "VisualGraph | None" = None
 

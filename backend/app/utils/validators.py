@@ -1,43 +1,44 @@
 """
-Validators — Terraform sanitization, service whitelist, graph validation.
+Validators — boto3 config sanitization, service whitelist, graph validation.
 """
 
-import re
 import logging
-
 from app.schemas.architecture import ArchitectureGraph
 
 logger = logging.getLogger(__name__)
 
 # ── AWS Service Whitelist ────────────────────────────────────────
 ALLOWED_AWS_SERVICES: set[str] = {
-    "aws_lambda",
-    "aws_apigatewayv2",
-    "aws_dynamodb",
-    "aws_sqs",
-    "aws_ecs",
-    "aws_rds",
-    "aws_elasticache",
-    "aws_s3",
-    "aws_vpc",
-    "aws_cloudfront",
-    "aws_sns",
-    "aws_iam_role",
-    "aws_security_group",
-    "aws_route53",
+    "aws_lambda", "aws_apigatewayv2", "aws_dynamodb", "aws_sqs",
+    "aws_ecs", "aws_rds", "aws_elasticache", "aws_s3", "aws_vpc",
+    "aws_cloudfront", "aws_sns", "aws_iam_role", "aws_security_group",
+    "aws_route53", "aws_ec2", "aws_eks", "aws_fargate", "aws_batch",
+    "aws_app_runner", "aws_elastic_beanstalk", "aws_lightsail",
+    "aws_cognito", "aws_kms", "aws_waf", "aws_acm", "aws_guardduty",
+    "aws_kinesis", "aws_eventbridge", "aws_step_functions", "aws_mq",
+    "aws_appsync", "aws_secrets_manager", "aws_athena", "aws_glue",
+    "aws_emr", "aws_sagemaker", "aws_msk", "aws_opensearch",
+    "aws_ses", "aws_pinpoint", "aws_amplify", "aws_iot",
+    "aws_connect", "aws_cloudformation", "aws_codepipeline",
+    "aws_codebuild", "aws_codecommit", "aws_codedeploy", "aws_ecr",
+    "aws_cloudwatch", "aws_cloudtrail", "aws_xray", "aws_health",
+    "aws_ebs", "aws_efs", "aws_fsx", "aws_aurora", "aws_neptune",
+    "aws_documentdb", "aws_redshift", "aws_keyspaces", "aws_timestream",
+    "aws_nat_gateway", "aws_elb", "aws_transit_gateway",
+    "aws_direct_connect", "aws_global_accelerator",
+    "aws_subnet", "aws_route_table", "aws_internet_gateway",
+    "_edge_",
 }
 
-# ── Terraform dangerous patterns ────────────────────────────────
-_DANGEROUS_PATTERNS: list[re.Pattern] = [
-    re.compile(r"provisioner\s+\"local-exec\"", re.IGNORECASE),
-    re.compile(r"provisioner\s+\"remote-exec\"", re.IGNORECASE),
-    re.compile(r"external\s+data", re.IGNORECASE),
-    re.compile(r"null_resource", re.IGNORECASE),
-    re.compile(r"local_file", re.IGNORECASE),
-    re.compile(r"template_file", re.IGNORECASE),
-    re.compile(r"\$\{.*\bfile\(", re.IGNORECASE),  # file() function
-    re.compile(r"\$\{.*\btemplatefile\(", re.IGNORECASE),
-]
+# ── Dangerous boto3 action patterns ─────────────────────────────
+# Actions that should never appear in AI-generated configs
+_DANGEROUS_ACTIONS: set[str] = {
+    "delete_account", "close_account",
+    "create_user",  # IAM users shouldn't be created by the tool
+    "put_user_policy",
+    "create_login_profile",
+    "create_access_key",
+}
 
 
 def validate_architecture_graph(graph: ArchitectureGraph) -> list[str]:
@@ -82,169 +83,27 @@ def validate_architecture_graph(graph: ArchitectureGraph) -> list[str]:
     return errors
 
 
-def sanitize_terraform_content(content: str) -> tuple[bool, list[str]]:
+def sanitize_boto3_config(configs: dict) -> tuple[bool, list[str]]:
     """
-    Check Terraform content for dangerous patterns.
+    Check boto3 config for dangerous API calls.
 
     Args:
-        content: Raw Terraform file content.
+        configs: Boto3 config dict (service -> list of operations).
 
     Returns:
-        Tuple of (is_safe, list of found dangerous patterns).
+        Tuple of (is_safe, list of found dangerous actions).
     """
     found: list[str] = []
 
-    for pattern in _DANGEROUS_PATTERNS:
-        if pattern.search(content):
-            found.append(pattern.pattern)
+    for service, operations in configs.items():
+        if not isinstance(operations, list):
+            continue
+        for op in operations:
+            action = op.get("action", "")
+            if action in _DANGEROUS_ACTIONS:
+                found.append(f"{service}.{action}")
 
     if found:
-        logger.warning("Dangerous Terraform patterns found: %s", found)
+        logger.warning("Dangerous boto3 actions found: %s", found)
 
     return len(found) == 0, found
-
-
-def sanitize_terraform_files(files: dict[str, str]) -> tuple[bool, dict[str, list[str]]]:
-    """
-    Validate all Terraform files in a file map.
-
-    Returns:
-        Tuple of (all_safe, dict mapping filename → list of issues).
-    """
-    all_safe = True
-    issues: dict[str, list[str]] = {}
-
-    for filename, content in files.items():
-        is_safe, found = sanitize_terraform_content(content)
-        if not is_safe:
-            all_safe = False
-            issues[filename] = found
-
-    return all_safe, issues
-
-
-# ── Terraform type-error auto-fixer ─────────────────────────────
-# Regex replacements applied sequentially to every .tf file
-# to correct common LLM type errors before the code is written to disk.
-_BOOL_STRING_FIXES: list[tuple[re.Pattern, str]] = [
-    # assign_public_ip: "ENABLED" → true, "DISABLED" → false
-    (re.compile(r'(assign_public_ip\s*=\s*)"ENABLED"', re.IGNORECASE), r'\1true'),
-    (re.compile(r'(assign_public_ip\s*=\s*)"DISABLED"', re.IGNORECASE), r'\1false'),
-    (re.compile(r'(assign_public_ip\s*=\s*)"true"', re.IGNORECASE), r'\1true'),
-    (re.compile(r'(assign_public_ip\s*=\s*)"false"', re.IGNORECASE), r'\1false'),
-
-    # enable_dns_hostnames/support: strings → bools
-    (re.compile(r'(enable_dns(?:_hostnames|_support)\s*=\s*)"true"', re.IGNORECASE), r'\1true'),
-    (re.compile(r'(enable_dns(?:_hostnames|_support)\s*=\s*)"false"', re.IGNORECASE), r'\1false'),
-
-    # multi_az: "true"/"false" strings → bools
-    (re.compile(r'(multi_az\s*=\s*)"true"', re.IGNORECASE), r'\1true'),
-    (re.compile(r'(multi_az\s*=\s*)"false"', re.IGNORECASE), r'\1false'),
-
-    # skip_final_snapshot: "true"/"false" → bools
-    (re.compile(r'(skip_final_snapshot\s*=\s*)"true"', re.IGNORECASE), r'\1true'),
-    (re.compile(r'(skip_final_snapshot\s*=\s*)"false"', re.IGNORECASE), r'\1false'),
-
-    # publicly_accessible: "true"/"false" → bools
-    (re.compile(r'(publicly_accessible\s*=\s*)"true"', re.IGNORECASE), r'\1true'),
-    (re.compile(r'(publicly_accessible\s*=\s*)"false"', re.IGNORECASE), r'\1false'),
-
-    # internal (LB): "true"/"false" → bools
-    (re.compile(r'(internal\s*=\s*)"true"', re.IGNORECASE), r'\1true'),
-    (re.compile(r'(internal\s*=\s*)"false"', re.IGNORECASE), r'\1false'),
-
-    # enabled: "true"/"false" → bools
-    (re.compile(r'(enabled\s*=\s*)"true"', re.IGNORECASE), r'\1true'),
-    (re.compile(r'(enabled\s*=\s*)"false"', re.IGNORECASE), r'\1false'),
-
-    # apply_immediately: "true"/"false" → bools
-    (re.compile(r'(apply_immediately\s*=\s*)"true"', re.IGNORECASE), r'\1true'),
-    (re.compile(r'(apply_immediately\s*=\s*)"false"', re.IGNORECASE), r'\1false'),
-
-    # Block public access booleans
-    (re.compile(r'(block_public(?:_acls|_policy|_access)\s*=\s*)"true"', re.IGNORECASE), r'\1true'),
-    (re.compile(r'(block_public(?:_acls|_policy|_access)\s*=\s*)"false"', re.IGNORECASE), r'\1false'),
-    (re.compile(r'(ignore_public_acls\s*=\s*)"true"', re.IGNORECASE), r'\1true'),
-    (re.compile(r'(ignore_public_acls\s*=\s*)"false"', re.IGNORECASE), r'\1false'),
-    (re.compile(r'(restrict_public_buckets\s*=\s*)"true"', re.IGNORECASE), r'\1true'),
-    (re.compile(r'(restrict_public_buckets\s*=\s*)"false"', re.IGNORECASE), r'\1false'),
-]
-
-
-def fix_terraform_type_errors(content: str) -> str:
-    """
-    Post-process Terraform content to fix common LLM type errors:
-    - Convert string boolean values to real Terraform booleans (true/false)
-    - Convert ENABLED/DISABLED strings to true/false for bool attributes
-
-    This acts as a reliable safety net independent of the LLM prompt.
-    """
-    for pattern, replacement in _BOOL_STRING_FIXES:
-        content, count = pattern.subn(replacement, content)
-        if count:
-            logger.debug("fix_terraform_type_errors: fixed %d occurrence(s) of %s", count, pattern.pattern)
-    return content
-
-
-# Detects an aws_ecs_task_definition block that is missing container_definitions
-_ECS_TASK_DEF_PATTERN = re.compile(
-    r'(resource\s+"aws_ecs_task_definition"\s+"(\w+)"\s*\{)((?:(?!container_definitions)[^}])*?)(\})',
-    re.DOTALL,
-)
-
-
-def fix_missing_container_definitions(content: str) -> str:
-    """
-    Detect aws_ecs_task_definition blocks missing the required
-    container_definitions argument and inject a working placeholder.
-
-    Also ensures an aws_cloudwatch_log_group is present if a task definition is added.
-    """
-    def _inject(m: re.Match) -> str:
-        block_open = m.group(1)
-        resource_name = m.group(2)
-        body = m.group(3)
-        block_close = m.group(4)
-
-        # Already has container_definitions (shouldn't hit, but be safe)
-        if "container_definitions" in body:
-            return m.group(0)
-
-        logger.warning(
-            "fix_missing_container_definitions: injecting placeholder container_definitions "
-            "into aws_ecs_task_definition.%s", resource_name
-        )
-
-        placeholder = f'''
-  container_definitions = jsonencode([
-    {{
-      name      = "{resource_name}"
-      image     = "nginx:latest"
-      cpu       = 256
-      memory    = 512
-      essential = true
-      portMappings = [
-        {{
-          containerPort = 80
-          protocol      = "tcp"
-        }}
-      ]
-    }}
-  ])
-'''
-        return block_open + body.rstrip() + placeholder + block_close
-
-    patched, count = _ECS_TASK_DEF_PATTERN.subn(_inject, content)
-    if count:
-        logger.info("fix_missing_container_definitions: patched %d ECS task definition(s)", count)
-    return patched
-
-
-def fix_terraform_files(files: dict[str, str]) -> dict[str, str]:
-    """Apply all Terraform auto-fixers to every file in a Terraform file map."""
-    result = {}
-    for filename, content in files.items():
-        content = fix_terraform_type_errors(content)
-        content = fix_missing_container_definitions(content)
-        result[filename] = content
-    return result

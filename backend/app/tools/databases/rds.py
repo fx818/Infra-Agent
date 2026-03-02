@@ -1,4 +1,4 @@
-"""Create RDS Instance tool."""
+"""Create RDS Instance tool — provisions via boto3."""
 from typing import Any
 from app.tools.base import BaseTool, ToolResult, ToolNode, ToolNodeConfig
 
@@ -24,30 +24,40 @@ class CreateRDSInstanceTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         did = params["db_id"]
+        label = params.get("label", did)
         engine = params.get("engine", "postgres")
-        tf_code = f'''resource "aws_db_instance" "{did}" {{
-  identifier           = "${{var.project_name}}-{did}"
-  engine               = "{engine}"
-  engine_version       = "{params.get('engine_version', '16.3')}"
-  instance_class       = "{params.get('instance_class', 'db.t3.micro')}"
-  allocated_storage    = {params.get('allocated_storage', 20)}
-  db_name              = "{params.get('db_name', 'appdb')}"
-  username             = "{params.get('username', 'admin')}"
-  password             = var.db_password
-  multi_az             = {str(params.get('multi_az', False)).lower()}
-  skip_final_snapshot  = true
-  storage_encrypted    = true
-  tags = {{ Name = "${{var.project_name}}-{did}" }}
-}}
-
-variable "db_password" {{
-  type      = string
-  sensitive = true
-  default   = "ChangeMe123!"
-}}
-'''
+        configs = [{
+            "service": "rds",
+            "action": "create_db_instance",
+            "params": {
+                "DBInstanceIdentifier": f"__PROJECT__-{did}",
+                "Engine": engine,
+                "EngineVersion": params.get("engine_version", "16.3"),
+                "DBInstanceClass": params.get("instance_class", "db.t3.micro"),
+                "AllocatedStorage": params.get("allocated_storage", 20),
+                "DBName": params.get("db_name", "appdb"),
+                "MasterUsername": params.get("username", "admin"),
+                "MasterUserPassword": "ChangeMe123!",
+                "MultiAZ": params.get("multi_az", False),
+                "StorageEncrypted": True,
+                "PubliclyAccessible": False,
+                "BackupRetentionPeriod": 7,
+                "Tags": [{"Key": "Name", "Value": f"__PROJECT__-{did}"}],
+            },
+            "label": label,
+            "resource_type": "aws_rds",
+            "resource_id_path": "DBInstance.DBInstanceIdentifier",
+            "delete_action": "delete_db_instance",
+            "delete_params": {
+                "DBInstanceIdentifier": f"__PROJECT__-{did}",
+                "SkipFinalSnapshot": True,
+                "DeleteAutomatedBackups": True,
+            },
+            "waiter": "db_instance_available",
+            "waiter_params": {"DBInstanceIdentifier": f"__PROJECT__-{did}"},
+        }]
         return ToolResult(
-            node=ToolNode(id=did, type="aws_rds", label=params.get("label", did),
+            node=ToolNode(id=did, type="aws_rds", label=label,
                           config=ToolNodeConfig(engine=engine, instance_type=params.get("instance_class", "db.t3.micro"))),
-            terraform_code={"database.tf": tf_code},
+            boto3_config={"rds": configs},
         )

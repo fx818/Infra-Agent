@@ -1,4 +1,5 @@
-"""Messaging tools: SQS, SNS, EventBridge, Step Functions, MQ, Kinesis, AppSync."""
+"""Messaging tools: SQS, SNS, EventBridge, Step Functions, MQ, Kinesis, AppSync — provisions via boto3."""
+import json
 from typing import Any
 from app.tools.base import BaseTool, ToolResult, ToolNode, ToolNodeConfig
 
@@ -20,20 +21,28 @@ class CreateSQSQueueTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         qid = params["queue_id"]
+        label = params.get("label", qid)
         fifo = params.get("fifo", False)
         suffix = ".fifo" if fifo else ""
-        tf_code = f'''resource "aws_sqs_queue" "{qid}" {{
-  name                       = "${{var.project_name}}-{qid}{suffix}"
-  {"fifo_queue = true" if fifo else ""}
-  visibility_timeout_seconds = {params.get('visibility_timeout', 30)}
-  message_retention_seconds  = {params.get('message_retention', 345600)}
-  tags = {{ Name = "${{var.project_name}}-{qid}" }}
-}}
-'''
+        attrs: dict[str, str] = {
+            "VisibilityTimeout": str(params.get("visibility_timeout", 30)),
+            "MessageRetentionPeriod": str(params.get("message_retention", 345600)),
+        }
+        if fifo:
+            attrs["FifoQueue"] = "true"
+        configs = [{
+            "service": "sqs",
+            "action": "create_queue",
+            "params": {"QueueName": f"__PROJECT__-{qid}{suffix}", "Attributes": attrs, "tags": {"Name": f"__PROJECT__-{qid}"}},
+            "label": label,
+            "resource_type": "aws_sqs",
+            "resource_id_path": "QueueUrl",
+            "delete_action": "delete_queue",
+            "delete_params_key": "QueueUrl",
+        }]
         return ToolResult(
-            node=ToolNode(id=qid, type="aws_sqs", label=params.get("label", qid),
-                          config=ToolNodeConfig(extra={"fifo": fifo})),
-            terraform_code={"messaging.tf": tf_code},
+            node=ToolNode(id=qid, type="aws_sqs", label=label, config=ToolNodeConfig(extra={"fifo": fifo})),
+            boto3_config={"sqs": configs},
         )
 
 
@@ -52,17 +61,23 @@ class CreateSNSTopicTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         tid = params["topic_id"]
+        label = params.get("label", tid)
         fifo = params.get("fifo_topic", False)
         suffix = ".fifo" if fifo else ""
-        tf_code = f'''resource "aws_sns_topic" "{tid}" {{
-  name       = "${{var.project_name}}-{tid}{suffix}"
-  {"fifo_topic = true" if fifo else ""}
-  tags = {{ Name = "${{var.project_name}}-{tid}" }}
-}}
-'''
+        attrs = {"FifoTopic": "true"} if fifo else {}
+        configs = [{
+            "service": "sns",
+            "action": "create_topic",
+            "params": {"Name": f"__PROJECT__-{tid}{suffix}", "Attributes": attrs, "Tags": [{"Key": "Name", "Value": f"__PROJECT__-{tid}"}]},
+            "label": label,
+            "resource_type": "aws_sns",
+            "resource_id_path": "TopicArn",
+            "delete_action": "delete_topic",
+            "delete_params_key": "TopicArn",
+        }]
         return ToolResult(
-            node=ToolNode(id=tid, type="aws_sns", label=params.get("label", tid), config=ToolNodeConfig()),
-            terraform_code={"messaging.tf": tf_code},
+            node=ToolNode(id=tid, type="aws_sns", label=label, config=ToolNodeConfig()),
+            boto3_config={"sns": configs},
         )
 
 
@@ -82,20 +97,25 @@ class CreateEventBridgeRuleTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         rid = params["rule_id"]
-        schedule = params.get("schedule", "")
-        pattern = params.get("event_pattern", "")
-        schedule_line = f'  schedule_expression = "{schedule}"' if schedule else ""
-        pattern_line = f'  event_pattern = jsonencode({pattern})' if pattern else ""
-        tf_code = f'''resource "aws_cloudwatch_event_rule" "{rid}" {{
-  name        = "${{var.project_name}}-{rid}"
-{schedule_line}
-{pattern_line}
-  tags = {{ Name = "${{var.project_name}}-{rid}" }}
-}}
-'''
+        label = params.get("label", rid)
+        put_params: dict[str, Any] = {"Name": f"__PROJECT__-{rid}", "State": "ENABLED", "Tags": [{"Key": "Name", "Value": f"__PROJECT__-{rid}"}]}
+        if params.get("schedule"):
+            put_params["ScheduleExpression"] = params["schedule"]
+        if params.get("event_pattern"):
+            put_params["EventPattern"] = params["event_pattern"]
+        configs = [{
+            "service": "events",
+            "action": "put_rule",
+            "params": put_params,
+            "label": label,
+            "resource_type": "aws_eventbridge_rule",
+            "resource_id_path": "RuleArn",
+            "delete_action": "delete_rule",
+            "delete_params": {"Name": f"__PROJECT__-{rid}"},
+        }]
         return ToolResult(
-            node=ToolNode(id=rid, type="aws_eventbridge", label=params.get("label", rid), config=ToolNodeConfig()),
-            terraform_code={"messaging.tf": tf_code},
+            node=ToolNode(id=rid, type="aws_eventbridge", label=label, config=ToolNodeConfig()),
+            boto3_config={"events": configs},
         )
 
 
@@ -114,30 +134,45 @@ class CreateStepFunctionTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         sid = params["sfn_id"]
-        tf_code = f'''resource "aws_sfn_state_machine" "{sid}" {{
-  name     = "${{var.project_name}}-{sid}"
-  role_arn = aws_iam_role.{sid}_sfn_role.arn
-  type     = "{params.get('type', 'STANDARD')}"
-  definition = jsonencode({{
-    Comment = "{params.get('label', sid)}"
-    StartAt = "Start"
-    States = {{
-      Start = {{ Type = "Pass", End = true }}
-    }}
-  }})
-}}
-
-resource "aws_iam_role" "{sid}_sfn_role" {{
-  name = "${{var.project_name}}-{sid}-sfn-role"
-  assume_role_policy = jsonencode({{
-    Version = "2012-10-17"
-    Statement = [{{ Action = "sts:AssumeRole", Effect = "Allow", Principal = {{ Service = "states.amazonaws.com" }} }}]
-  }})
-}}
-'''
+        label = params.get("label", sid)
+        sfn_type = params.get("type", "STANDARD")
+        configs = [
+            {
+                "service": "iam",
+                "action": "create_role",
+                "params": {
+                    "RoleName": f"__PROJECT__-{sid}-sfn-role",
+                    "AssumeRolePolicyDocument": json.dumps({
+                        "Version": "2012-10-17",
+                        "Statement": [{"Action": "sts:AssumeRole", "Effect": "Allow", "Principal": {"Service": "states.amazonaws.com"}}],
+                    }),
+                },
+                "label": f"{label} — Role",
+                "resource_type": "aws_iam_role",
+                "resource_id_path": "Role.Arn",
+                "delete_action": "delete_role",
+                "delete_params": {"RoleName": f"__PROJECT__-{sid}-sfn-role"},
+            },
+            {
+                "service": "stepfunctions",
+                "action": "create_state_machine",
+                "params": {
+                    "name": f"__PROJECT__-{sid}",
+                    "roleArn": f"__RESOLVE__:iam:create_role:{sid}-sfn-role:Role.Arn",
+                    "type": sfn_type,
+                    "definition": json.dumps({"Comment": label, "StartAt": "Start", "States": {"Start": {"Type": "Pass", "End": True}}}),
+                    "tags": [{"key": "Name", "value": f"__PROJECT__-{sid}"}],
+                },
+                "label": label,
+                "resource_type": "aws_step_functions",
+                "resource_id_path": "stateMachineArn",
+                "delete_action": "delete_state_machine",
+                "delete_params_key": "stateMachineArn",
+            },
+        ]
         return ToolResult(
-            node=ToolNode(id=sid, type="aws_step_functions", label=params.get("label", sid), config=ToolNodeConfig()),
-            terraform_code={"messaging.tf": tf_code},
+            node=ToolNode(id=sid, type="aws_step_functions", label=label, config=ToolNodeConfig()),
+            boto3_config={"stepfunctions": configs},
         )
 
 
@@ -157,23 +192,31 @@ class CreateMQBrokerTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         mid = params["mq_id"]
-        tf_code = f'''resource "aws_mq_broker" "{mid}" {{
-  broker_name        = "${{var.project_name}}-{mid}"
-  engine_type        = "{params.get('engine_type', 'RabbitMQ')}"
-  engine_version     = "3.11.20"
-  host_instance_type = "{params.get('instance_type', 'mq.m5.large')}"
-  deployment_mode    = "SINGLE_INSTANCE"
-  user {{
-    username = "admin"
-    password = var.db_password
-  }}
-  tags = {{ Name = "${{var.project_name}}-{mid}" }}
-}}
-'''
+        label = params.get("label", mid)
+        engine = params.get("engine_type", "RabbitMQ")
+        engine_versions = {"RabbitMQ": "3.11.20", "ActiveMQ": "5.17.6"}
+        configs = [{
+            "service": "mq",
+            "action": "create_broker",
+            "params": {
+                "BrokerName": f"__PROJECT__-{mid}",
+                "EngineType": engine.upper(),
+                "EngineVersion": engine_versions.get(engine, "3.11.20"),
+                "HostInstanceType": params.get("instance_type", "mq.m5.large"),
+                "DeploymentMode": "SINGLE_INSTANCE",
+                "Users": [{"Username": "admin", "Password": "ChangeMe123!"}],
+                "PubliclyAccessible": False,
+                "Tags": {"Name": f"__PROJECT__-{mid}"},
+            },
+            "label": label,
+            "resource_type": "aws_mq",
+            "resource_id_path": "BrokerId",
+            "delete_action": "delete_broker",
+            "delete_params_key": "BrokerId",
+        }]
         return ToolResult(
-            node=ToolNode(id=mid, type="aws_mq", label=params.get("label", mid),
-                          config=ToolNodeConfig(engine=params.get("engine_type", "RabbitMQ"))),
-            terraform_code={"messaging.tf": tf_code},
+            node=ToolNode(id=mid, type="aws_mq", label=label, config=ToolNodeConfig(engine=engine)),
+            boto3_config={"mq": configs},
         )
 
 
@@ -193,16 +236,27 @@ class CreateKinesisStreamTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         sid = params["stream_id"]
-        tf_code = f'''resource "aws_kinesis_stream" "{sid}" {{
-  name             = "${{var.project_name}}-{sid}"
-  shard_count      = {params.get('shard_count', 1)}
-  retention_period = {params.get('retention_hours', 24)}
-  tags = {{ Name = "${{var.project_name}}-{sid}" }}
-}}
-'''
+        label = params.get("label", sid)
+        configs = [{
+            "service": "kinesis",
+            "action": "create_stream",
+            "params": {
+                "StreamName": f"__PROJECT__-{sid}",
+                "ShardCount": params.get("shard_count", 1),
+                "StreamModeDetails": {"StreamMode": "PROVISIONED"},
+                "Tags": {"Name": f"__PROJECT__-{sid}"},
+            },
+            "label": label,
+            "resource_type": "aws_kinesis",
+            "resource_id_path": None,
+            "delete_action": "delete_stream",
+            "delete_params": {"StreamName": f"__PROJECT__-{sid}", "EnforceConsumerDeletion": True},
+            "waiter": "stream_exists",
+            "waiter_params": {"StreamName": f"__PROJECT__-{sid}"},
+        }]
         return ToolResult(
-            node=ToolNode(id=sid, type="aws_kinesis", label=params.get("label", sid), config=ToolNodeConfig()),
-            terraform_code={"messaging.tf": tf_code},
+            node=ToolNode(id=sid, type="aws_kinesis", label=label, config=ToolNodeConfig()),
+            boto3_config={"kinesis": configs},
         )
 
 
@@ -221,18 +275,22 @@ class CreateAppSyncAPITool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         aid = params["api_id"]
-        tf_code = f'''resource "aws_appsync_graphql_api" "{aid}" {{
-  name                = "${{var.project_name}}-{aid}"
-  authentication_type = "{params.get('auth_type', 'API_KEY')}"
-  schema = <<EOF
-type Query {{
-  hello: String
-}}
-EOF
-  tags = {{ Name = "${{var.project_name}}-{aid}" }}
-}}
-'''
+        label = params.get("label", aid)
+        configs = [{
+            "service": "appsync",
+            "action": "create_graphql_api",
+            "params": {
+                "name": f"__PROJECT__-{aid}",
+                "authenticationType": params.get("auth_type", "API_KEY"),
+                "tags": {"Name": f"__PROJECT__-{aid}"},
+            },
+            "label": label,
+            "resource_type": "aws_appsync",
+            "resource_id_path": "graphqlApi.apiId",
+            "delete_action": "delete_graphql_api",
+            "delete_params_key": "apiId",
+        }]
         return ToolResult(
-            node=ToolNode(id=aid, type="aws_appsync", label=params.get("label", aid), config=ToolNodeConfig()),
-            terraform_code={"messaging.tf": tf_code},
+            node=ToolNode(id=aid, type="aws_appsync", label=label, config=ToolNodeConfig()),
+            boto3_config={"appsync": configs},
         )

@@ -86,7 +86,7 @@ export interface ArchitectureGraph {
 }
 
 export interface TerraformFileMap {
-    files: Record<string, string>;
+    files: Record<string, unknown>;
 }
 
 export interface CostBreakdown {

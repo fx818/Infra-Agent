@@ -1,4 +1,4 @@
-"""AWS ElastiCache tool."""
+"""AWS ElastiCache tool — provisions via boto3."""
 from typing import Any
 from app.tools.base import BaseTool, ToolResult, ToolNode, ToolNodeConfig
 
@@ -25,32 +25,35 @@ class CreateElastiCacheTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         cid = params["cache_id"]
+        label = params.get("label", cid)
         engine = params.get("engine", "redis")
         node_type = params.get("node_type", "cache.t3.micro")
         num_nodes = params.get("num_nodes", 1)
-        vpc_ref = params.get("vpc_id", "main_vpc")
-
+        safe_cid = cid.lower().replace("_", "-")
         port = 6379 if engine == "redis" else 11211
 
-        tf_code = f'''
-resource "aws_elasticache_subnet_group" "{cid}_subnet_group" {{
-  name       = "${{var.project_name}}-{cid}-subnet"
-  subnet_ids = [aws_subnet.{vpc_ref}_private_0.id]
-}}
+        configs = [{
+            "service": "elasticache",
+            "action": "create_cache_cluster",
+            "params": {
+                "CacheClusterId": f"__PROJECT__-{safe_cid}",
+                "Engine": engine,
+                "CacheNodeType": node_type,
+                "NumCacheNodes": num_nodes,
+                "Port": port,
+                "Tags": [{"Key": "Name", "Value": f"__PROJECT__-{safe_cid}"}],
+            },
+            "label": label,
+            "resource_type": "aws_elasticache",
+            "resource_id_path": "CacheCluster.CacheClusterId",
+            "delete_action": "delete_cache_cluster",
+            "delete_params": {"CacheClusterId": f"__PROJECT__-{safe_cid}"},
+            "waiter": "cache_cluster_available",
+            "waiter_params": {"CacheClusterId": f"__PROJECT__-{safe_cid}"},
+        }]
 
-resource "aws_elasticache_cluster" "{cid}" {{
-  cluster_id           = "${{var.project_name}}-{cid}"
-  engine               = "{engine}"
-  node_type            = "{node_type}"
-  num_cache_nodes      = {num_nodes}
-  parameter_group_name = "default.{engine}7"
-  port                 = {port}
-  subnet_group_name    = aws_elasticache_subnet_group.{cid}_subnet_group.name
-  tags                 = {{ Name = "${{var.project_name}}-{cid}" }}
-}}
-'''
         return ToolResult(
-            node=ToolNode(id=cid, type="aws_elasticache", label=params.get("label", cid),
+            node=ToolNode(id=cid, type="aws_elasticache", label=label,
                           config=ToolNodeConfig(extra={"engine": engine, "node_type": node_type})),
-            terraform_code={"databases.tf": tf_code},
+            boto3_config={"elasticache": configs},
         )

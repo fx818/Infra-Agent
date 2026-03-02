@@ -4,7 +4,7 @@ Architecture API routes — generate, edit, cost, and retrieve architectures.
 
 import json
 import logging
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from openai import AuthenticationError, APIConnectionError
@@ -21,20 +21,16 @@ from app.schemas.architecture import (
     ArchitectureResponse,
     CostEstimate,
     IntentOutput,
-    TerraformFileMap,
     VisualGraph,
 )
 from app.schemas.chat import ChatMessageResponse
 from app.schemas.project import ProjectEditRequest, ProjectGenerateRequest
-from app.services.ai.architecture_agent import ArchitectureAgent
 from app.services.ai.cost_agent import CostAgent
 from app.services.ai.edit_agent import EditAgent
-from app.services.ai.intent_agent import IntentAgent
-from app.services.ai.terraform_agent import TerraformAgent
 from app.services.ai.tool_agent import ToolAgent
 from app.services.ai.visual_agent import VisualAgent
-from app.services.terraform.workspace_manager import WorkspaceManager
-from app.utils.validators import fix_terraform_files, sanitize_terraform_files, validate_architecture_graph
+from app.services.ai.base import BaseLLMProvider
+from app.utils.validators import sanitize_boto3_config, validate_architecture_graph
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +93,7 @@ async def generate_architecture(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
     """
-    Full generation pipeline: NL → Intent → Architecture → Terraform → Cost → Visual.
+    Full generation pipeline: NL → Tool Agent (architecture + boto3 configs) → Cost → Visual.
     """
     project = await _get_user_project(project_id, db, current_user)
 
@@ -110,7 +106,7 @@ async def generate_architecture(
         # Configure LLM for this user
         llm = _get_llm_provider_for_user(current_user)
 
-        # 1. Tool Agent — uses LLM tool-calling to build architecture + terraform in one step
+        # 1. Tool Agent — uses LLM tool-calling to build architecture + boto3 configs
         tool_agent = ToolAgent(llm=llm)
         agent_result = await tool_agent.run(
             user_prompt=payload.natural_language_input,
@@ -119,18 +115,17 @@ async def generate_architecture(
         )
 
         graph = agent_result["graph"]
-        terraform_files = agent_result["terraform"]
+        boto3_configs = agent_result["boto3_configs"]
 
         # 2. Validate architecture
         errors = validate_architecture_graph(graph)
         if errors:
             logger.warning("Architecture validation warnings: %s", errors)
 
-        # 3. Auto-fix LLM type errors (string booleans, etc.) then sanitize
-        terraform_files.files = fix_terraform_files(terraform_files.files)
-        is_safe, issues = sanitize_terraform_files(terraform_files.files)
+        # 3. Sanitize boto3 config (check for dangerous API calls)
+        is_safe, issues = sanitize_boto3_config(boto3_configs)
         if not is_safe:
-            logger.warning("Terraform sanitization issues: %s", issues)
+            logger.warning("Boto3 config safety issues: %s", issues)
 
         # 4. Build a lightweight intent for backwards compat with the DB schema
         intent = IntentOutput(
@@ -150,11 +145,7 @@ async def generate_architecture(
         visual_agent = VisualAgent(llm=llm)
         visual = await visual_agent.run(graph)
 
-        # 7. Write Terraform files to workspace
-        workspace_mgr = WorkspaceManager()
-        workspace_mgr.write_terraform_files(project_id, terraform_files.files)
-
-        # 8. Get current version
+        # 7. Get current version
         result = await db.execute(
             select(Architecture)
             .where(Architecture.project_id == project_id)
@@ -163,13 +154,13 @@ async def generate_architecture(
         latest = result.scalars().first()
         new_version = (latest.version + 1) if latest else 1
 
-        # 9. Save architecture
+        # 8. Save architecture (boto3 configs stored in terraform_files_json column for backward compat)
         architecture = Architecture(
             project_id=project_id,
             version=new_version,
             intent_json=intent.model_dump(),
             graph_json=graph.model_dump(by_alias=True),
-            terraform_files_json=terraform_files.model_dump(),
+            terraform_files_json=json.dumps({"files": boto3_configs}),
             cost_json=cost.model_dump(),
             visual_json=visual.model_dump(),
         )
@@ -204,7 +195,7 @@ async def generate_architecture(
             "version": new_version,
             "intent": intent.model_dump(),
             "graph": graph.model_dump(by_alias=True),
-            "terraform_files": terraform_files.model_dump(),
+            "terraform_files": {"files": boto3_configs},
             "cost": cost.model_dump(),
             "visual": visual.model_dump(),
         }
@@ -245,7 +236,7 @@ async def edit_architecture(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Architecture:
     """
-    Edit existing architecture: Edit → Terraform Regen → Cost → Visual → Version++.
+    Edit existing architecture: Edit → Boto3 Config Regen → Cost → Visual → Version++.
     """
     project = await _get_user_project(project_id, db, current_user)
 
@@ -273,7 +264,7 @@ async def edit_architecture(
         # Configure LLM for this user
         llm = _get_llm_provider_for_user(current_user)
 
-        # 1. Edit Agent
+        # 1. Edit Agent — modifies the architecture graph
         edit_agent = EditAgent(llm=llm)
         modified_graph = await edit_agent.run(current_graph, payload.modification_prompt)
 
@@ -282,15 +273,47 @@ async def edit_architecture(
         if errors:
             logger.warning("Modified architecture validation warnings: %s", errors)
 
-        # 3. Regenerate Terraform
-        tf_agent = TerraformAgent(llm=llm)
-        terraform_files = await tf_agent.run(modified_graph, region=project.region, project_name=project.name)
+        # 3. Regenerate boto3 configs via ToolAgent using the modified graph
+        #    Build an explicit per-service prompt so the LLM reliably calls one tool per node
+        service_lines = "\n".join(
+            f"- {node.type} node '{node.id}' labelled '{node.label}'"
+            for node in modified_graph.nodes
+        )
+        regen_prompt = (
+            f"Provision the following AWS infrastructure by calling the appropriate tool for "
+            f"EACH service listed. Do not skip any. Call one tool per service, then call "
+            f"`connect_services` for each edge in the graph.\n\n"
+            f"Services to create:\n{service_lines}\n\n"
+            f"Edges (connections):\n"
+            + "\n".join(
+                f"- {e.source} → {e.target} ({e.label})"
+                for e in modified_graph.edges
+            )
+        )
+        tool_agent = ToolAgent(llm=llm)
+        regen_result = await tool_agent.run(
+            user_prompt=regen_prompt,
+            region=project.region,
+            project_name=project.name,
+        )
+        boto3_configs = regen_result["boto3_configs"]
 
-        # 4. Auto-fix LLM type errors then sanitize
-        terraform_files.files = fix_terraform_files(terraform_files.files)
-        is_safe, issues = sanitize_terraform_files(terraform_files.files)
+        # Fallback: if the LLM returned no tool calls (empty configs), keep the previous
+        # architecture's boto3 configs so deployment doesn't silently break.
+        if not boto3_configs:
+            prev_files = _parse_json(latest.terraform_files_json)
+            if isinstance(prev_files, dict):
+                boto3_configs = prev_files.get("files", prev_files)
+            logger.warning(
+                "ToolAgent returned empty boto3_configs during edit of project %d — "
+                "falling back to previous architecture's configs.",
+                project_id,
+            )
+
+        # 4. Sanitize boto3 config
+        is_safe, issues = sanitize_boto3_config(boto3_configs)
         if not is_safe:
-            logger.warning("Terraform sanitization issues: %s", issues)
+            logger.warning("Boto3 config safety issues: %s", issues)
 
         # 5. Cost
         cost_agent = CostAgent(llm=llm)
@@ -301,18 +324,14 @@ async def edit_architecture(
         visual_agent = VisualAgent(llm=llm)
         visual = await visual_agent.run(modified_graph)
 
-        # 7. Write files
-        workspace_mgr = WorkspaceManager()
-        workspace_mgr.write_terraform_files(project_id, terraform_files.files)
-
-        # 8. Save new version
+        # 7. Save new version (boto3 configs stored in terraform_files_json for backward compat)
         new_version = latest.version + 1
         architecture = Architecture(
             project_id=project_id,
             version=new_version,
             intent_json=latest.intent_json,
             graph_json=modified_graph.model_dump(by_alias=True),
-            terraform_files_json=terraform_files.model_dump(),
+            terraform_files_json=json.dumps({"files": boto3_configs}),
             cost_json=cost.model_dump(),
             visual_json=visual.model_dump(),
         )

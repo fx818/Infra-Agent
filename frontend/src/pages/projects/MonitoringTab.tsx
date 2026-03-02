@@ -26,8 +26,16 @@ interface Props {
 }
 
 interface ResourceMetric {
-    name: string;
-    type: string;
+    // Backend (executor.py) fields
+    label?: string;
+    resource_id?: string;
+    resource_type?: string;
+    service?: string;
+    action?: string;
+    status?: string;
+    // Legacy / CloudWatch-mapped fields
+    name?: string;
+    type?: string;
     metrics?: Record<string, any>;
 }
 
@@ -454,10 +462,10 @@ export const MonitoringTab: React.FC<Props> = ({ projectId }) => {
                         <div className="flex-1 overflow-auto p-3 space-y-2">
                             {data?.resources && data.resources.length > 0 ? data.resources.map((res, i) => (
                                 <div key={i} className="flex items-center gap-3 p-3 rounded-lg bg-white/[0.02] border border-border/20 hover:border-border/40 transition-all">
-                                    <div className="w-8 h-8 rounded-lg bg-white/[0.04] flex items-center justify-center shrink-0">{getResourceIcon(res.type)}</div>
+                                    <div className="w-8 h-8 rounded-lg bg-white/[0.04] flex items-center justify-center shrink-0">{getResourceIcon(res.resource_type ?? res.type)}</div>
                                     <div className="flex-1 min-w-0">
-                                        <p className="text-xs font-medium truncate">{res.name}</p>
-                                        <p className="text-[10px] text-muted-foreground/40">{getResourceLabel(res.type)}</p>
+                                        <p className="text-xs font-medium truncate">{res.label || res.resource_id || res.name || 'Unknown'}</p>
+                                        <p className="text-[10px] text-muted-foreground/40">{getResourceLabel(res.resource_type ?? res.type)}</p>
                                     </div>
                                     <div className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium badge-success">
                                         <CheckCircle2 size={10} /><span>Active</span>
@@ -465,7 +473,7 @@ export const MonitoringTab: React.FC<Props> = ({ projectId }) => {
                                 </div>
                             )) : (
                                 <div className="flex flex-col items-center justify-center h-full gap-3 py-12">
-                                    <p className="text-xs text-muted-foreground/40">Resource details loading from terraform state…</p>
+                                    <p className="text-xs text-muted-foreground/40">Resource details loading from infrastructure state…</p>
                                 </div>
                             )}
                         </div>
@@ -493,7 +501,7 @@ export const MonitoringTab: React.FC<Props> = ({ projectId }) => {
                             <div className="flex items-center gap-2 flex-1 min-w-0">
                                 <Terminal size={13} className="text-muted-foreground/50 shrink-0" />
                                 <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/60 truncate">
-                                    {selected.size > 0 ? `${selected.size} selected` : 'Terraform State'}
+                                    {selected.size > 0 ? `${selected.size} selected` : 'Resource State'}
                                 </h3>
                             </div>
 
@@ -554,7 +562,7 @@ export const MonitoringTab: React.FC<Props> = ({ projectId }) => {
                             }) : (
                                 <div className="flex flex-col items-center justify-center py-16 gap-3">
                                     <Terminal size={28} className="text-muted-foreground/20" />
-                                    <p className="text-xs text-muted-foreground/40">No resources in Terraform state</p>
+                                    <p className="text-xs text-muted-foreground/40">No resources in state</p>
                                 </div>
                             )}
                         </div>

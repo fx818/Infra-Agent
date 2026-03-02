@@ -22,7 +22,7 @@ import {
 
 interface Props {
     projectId: number;
-    onStatusChange?: () => void;
+    onStatusChange?: () => void | Promise<void>;
 }
 
 // ── Phase detection helpers ────────────────────────────────────────
@@ -32,12 +32,12 @@ type DeployPhase = 'idle' | 'init' | 'plan' | 'apply' | 'destroy' | 'complete' |
 function detectPhase(logs: string): DeployPhase {
     if (!logs) return 'idle';
     const lower = logs.toLowerCase();
-    if (lower.includes('[error] command failed') || lower.includes('deployment failed')) return 'failed';
-    if (lower.includes('deployment successful') || lower.includes('apply complete')) return 'complete';
-    if (lower.includes('running terraform apply') || lower.includes('terraform apply')) return 'apply';
-    if (lower.includes('running terraform destroy')) return 'destroy';
-    if (lower.includes('running terraform plan')) return 'plan';
-    if (lower.includes('terraform init') || lower.includes('initializing')) return 'init';
+    if (lower.includes('[error] command failed') || lower.includes('deployment failed') || lower.includes('boto3 deployment failed') || lower.includes('boto3 destroy failed')) return 'failed';
+    if (lower.includes('deployment successful') || lower.includes('provisioning complete') || lower.includes('boto3 deployment finished: success') || lower.includes('destruction complete')) return 'complete';
+    if (lower.includes('starting aws resource provisioning') || lower.includes('starting boto3 deployment')) return 'apply';
+    if (lower.includes('starting aws resource destruction') || lower.includes('starting boto3 destroy')) return 'destroy';
+    if (lower.includes('validating infrastructure configuration')) return 'plan';
+    if (lower.includes('initializing')) return 'init';
     return 'idle';
 }
 
@@ -102,20 +102,20 @@ function colorizeLogLine(line: string, idx: number) {
         return <span key={idx} className="text-amber-400">{line}{'\n'}</span>;
     }
     // Success / creation lines
-    if (trimmed.includes('Creation complete') || trimmed.includes('Apply complete') || trimmed.includes('Destroy complete') || trimmed.includes('[AUTO-ROLLBACK] ✓')) {
+    if (trimmed.includes('✓ Created') || trimmed.includes('✓ Destroyed') || trimmed.includes('is ready') || trimmed.includes('Provisioning complete') || trimmed.includes('Destruction complete') || trimmed.includes('[AUTO-ROLLBACK] ✓')) {
         return <span key={idx} className="text-emerald-400 font-medium">{line}{'\n'}</span>;
     }
+    // Failure lines from boto3
+    if (trimmed.includes('✗ FAILED')) {
+        return <span key={idx} className="text-red-400 font-semibold">{line}{'\n'}</span>;
+    }
     // Phase markers
-    if (trimmed.startsWith('=== ') || trimmed.startsWith('Running terraform') || trimmed.startsWith('Starting deployment')) {
+    if (trimmed.startsWith('=== ') || trimmed.startsWith('Starting deployment') || trimmed.startsWith('Deployment complete')) {
         return <span key={idx} className="text-blue-400 font-semibold">{line}{'\n'}</span>;
     }
-    // Creating/Modifying resource
-    if (trimmed.includes(': Creating...') || trimmed.includes(': Modifying...') || trimmed.includes(': Destroying...')) {
-        return <span key={idx} className="text-cyan-300/70">{line}{'\n'}</span>;
-    }
-    // Still creating
-    if (trimmed.includes('Still creating') || trimmed.includes('Still destroying') || trimmed.includes('Still modifying')) {
-        return <span key={idx} className="text-white/30 italic">{line}{'\n'}</span>;
+    // Waiting for resource readiness
+    if (trimmed.includes('⏳ Waiting')) {
+        return <span key={idx} className="text-cyan-300/70 italic">{line}{'\n'}</span>;
     }
     // Plan output
     if (trimmed.startsWith('+') || trimmed.startsWith('# ')) {
@@ -222,6 +222,7 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
 
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
+            let sseBuffer = '';
 
             // Initial status
             setStatus(prev => ({
@@ -234,16 +235,31 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
                 const { value, done } = await reader.read();
                 if (done) break;
 
-                const chunk = decoder.decode(value, { stream: true });
-                setStatus(prev => ({
-                    ...prev!,
-                    logs: (prev?.logs || '') + chunk
-                }));
+                sseBuffer += decoder.decode(value, { stream: true });
+
+                // Parse complete SSE events (separated by \n\n)
+                const parts = sseBuffer.split('\n\n');
+                sseBuffer = parts.pop() ?? '';   // keep incomplete last chunk
+
+                let newContent = '';
+                for (const part of parts) {
+                    for (const line of part.split('\n')) {
+                        if (line.startsWith('data: ')) {
+                            newContent += line.slice(6) + '\n';
+                        }
+                    }
+                }
+                if (newContent) {
+                    setStatus(prev => ({
+                        ...prev!,
+                        logs: (prev?.logs || '') + newContent
+                    }));
+                }
             }
 
             // Stream finished - refresh full status to get final state/timestamps
             await fetchStatus();
-            onStatusChange?.();
+            await onStatusChange?.();
 
         } catch (err: any) {
             const detail = err.message || 'Deployment failed';
@@ -268,7 +284,7 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
         } finally {
             setDestroying(false);
             await fetchStatus();
-            onStatusChange?.();
+            await onStatusChange?.();
         }
     };
 

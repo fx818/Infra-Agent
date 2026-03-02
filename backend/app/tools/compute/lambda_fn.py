@@ -1,6 +1,17 @@
-"""Create Lambda Function tool."""
+"""Create Lambda Function tool — provisions via boto3."""
+import json
+import io
+import zipfile
 from typing import Any
 from app.tools.base import BaseTool, ToolResult, ToolNode, ToolNodeConfig
+
+
+def _placeholder_zip() -> bytes:
+    """Create a minimal Lambda deployment zip in memory."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("index.py", 'def handler(event, ctx):\n    return {"statusCode": 200, "body": "Hello from NL2I"}\n')
+    return buf.getvalue()
 
 
 class CreateLambdaFunctionTool(BaseTool):
@@ -51,47 +62,74 @@ class CreateLambdaFunctionTool(BaseTool):
         timeout = params.get("timeout", 30)
         handler = params.get("handler", "index.handler")
 
-        tf_code = f'''resource "aws_lambda_function" "{fid}" {{
-  function_name = join("-", [var.project_name, "{fid}"])
-  role          = aws_iam_role.{fid}_role.arn
-  handler       = "{handler}"
-  runtime       = "{runtime}"
-  memory_size   = {memory}
-  timeout       = {timeout}
-  filename      = "{fid}.zip"
+        configs = [
+            # 1. Create IAM role for Lambda
+            {
+                "service": "iam",
+                "action": "create_role",
+                "params": {
+                    "RoleName": f"__PROJECT__-{fid}-role",
+                    "AssumeRolePolicyDocument": json.dumps({
+                        "Version": "2012-10-17",
+                        "Statement": [{
+                            "Effect": "Allow",
+                            "Principal": {"Service": "lambda.amazonaws.com"},
+                            "Action": "sts:AssumeRole",
+                        }],
+                    }),
+                    "Tags": [{"Key": "Name", "Value": f"__PROJECT__-{fid}-role"}],
+                },
+                "label": f"{label} — IAM Role",
+                "resource_type": "aws_iam_role",
+                "resource_id_path": "Role.Arn",
+                "delete_action": "delete_role",
+                "delete_params": {"RoleName": f"__PROJECT__-{fid}-role"},
+            },
+            # 2. Attach basic execution policy
+            {
+                "service": "iam",
+                "action": "attach_role_policy",
+                "params": {
+                    "RoleName": f"__PROJECT__-{fid}-role",
+                    "PolicyArn": "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+                },
+                "label": f"{label} — Policy Attachment",
+                "resource_type": "aws_iam_policy_attachment",
+                "is_support": True,
+                "delete_action": "detach_role_policy",
+                "delete_params": {
+                    "RoleName": f"__PROJECT__-{fid}-role",
+                    "PolicyArn": "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+                },
+            },
+            # 3. Create the Lambda function
+            {
+                "service": "lambda",
+                "action": "create_function",
+                "params": {
+                    "FunctionName": f"__PROJECT__-{fid}",
+                    "Runtime": runtime,
+                    "Role": f"__RESOLVE__:iam:create_role:{fid}-role:Role.Arn",
+                    "Handler": handler,
+                    "MemorySize": memory,
+                    "Timeout": timeout,
+                    "Code": {"ZipFile": "__PLACEHOLDER_ZIP__"},
+                    "Tags": {"Name": f"__PROJECT__-{fid}"},
+                },
+                "label": label,
+                "resource_type": "aws_lambda_function",
+                "resource_id_path": "FunctionArn",
+                "delete_action": "delete_function",
+                "delete_params": {"FunctionName": f"__PROJECT__-{fid}"},
+                "waiter": "function_active_v2",
+                "needs_role_delay": True,
+            },
+        ]
 
-  tags = {{
-    Name = join("-", [var.project_name, "{fid}"])
-  }}
-}}
-
-resource "aws_iam_role" "{fid}_role" {{
-  name = join("-", [var.project_name, "{fid}", "role"])
-
-  assume_role_policy = jsonencode({{
-    Version = "2012-10-17"
-    Statement = [{{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
-      Principal = {{ Service = "lambda.amazonaws.com" }}
-    }}]
-  }})
-}}
-
-resource "aws_iam_role_policy_attachment" "{fid}_basic" {{
-  role       = aws_iam_role.{fid}_role.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-}}
-
-resource "aws_cloudwatch_log_group" "{fid}_logs" {{
-  name              = join("/", ["", "aws", "lambda", join("-", [var.project_name, "{fid}"])])
-  retention_in_days = 14
-}}
-'''
         return ToolResult(
             node=ToolNode(
                 id=fid, type="aws_lambda", label=label,
                 config=ToolNodeConfig(runtime=runtime, memory=memory, extra={"timeout": timeout, "handler": handler}),
             ),
-            terraform_code={"compute.tf": tf_code},
+            boto3_config={"lambda": configs},
         )

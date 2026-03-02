@@ -1,4 +1,4 @@
-"""Create Lightsail Instance tool."""
+"""Create Lightsail Instance tool — provisions via boto3."""
 from typing import Any
 from app.tools.base import BaseTool, ToolResult, ToolNode, ToolNodeConfig
 
@@ -20,16 +20,29 @@ class CreateLightsailInstanceTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         iid = params["instance_id"]
-        tf_code = f'''resource "aws_lightsail_instance" "{iid}" {{
-  name              = "${{var.project_name}}-{iid}"
-  availability_zone = "${{var.region}}a"
-  blueprint_id      = "{params.get('blueprint_id', 'amazon_linux_2')}"
-  bundle_id         = "{params.get('bundle_id', 'nano_3_0')}"
-  tags = {{ Name = "${{var.project_name}}-{iid}" }}
-}}
-'''
+        label = params.get("label", iid)
+        blueprint = params.get("blueprint_id", "amazon_linux_2")
+        bundle = params.get("bundle_id", "nano_3_0")
+
+        configs = [{
+            "service": "lightsail",
+            "action": "create_instances",
+            "params": {
+                "instanceNames": [f"__PROJECT__-{iid}"],
+                "availabilityZone": "__REGION__a",
+                "blueprintId": blueprint,
+                "bundleId": bundle,
+                "tags": [{"key": "Name", "value": f"__PROJECT__-{iid}"}],
+            },
+            "label": label,
+            "resource_type": "aws_lightsail_instance",
+            "resource_id_path": "operations[0].resourceName",
+            "delete_action": "delete_instance",
+            "delete_params": {"instanceName": f"__PROJECT__-{iid}"},
+        }]
+
         return ToolResult(
-            node=ToolNode(id=iid, type="aws_lightsail", label=params.get("label", iid),
-                          config=ToolNodeConfig(extra={"blueprint": params.get("blueprint_id", "amazon_linux_2")})),
-            terraform_code={"compute.tf": tf_code},
+            node=ToolNode(id=iid, type="aws_lightsail", label=label,
+                          config=ToolNodeConfig(extra={"blueprint": blueprint})),
+            boto3_config={"lightsail": configs},
         )

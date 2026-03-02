@@ -1,4 +1,4 @@
-"""Create Outpost tool."""
+"""Create Outpost tool — provisions via boto3."""
 from typing import Any
 from app.tools.base import BaseTool, ToolResult, ToolNode, ToolNodeConfig
 
@@ -19,18 +19,21 @@ class CreateOutpostTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         oid = params["outpost_id"]
-        tf_code = f'''# AWS Outposts — configuration reference
-# Note: Outposts require physical hardware provisioning via AWS console.
-# This resource references the outpost for use by other services.
+        label = params.get("label", oid)
+        site_name = params.get("site_name", "on-prem-dc")
 
-data "aws_outposts_outposts" "{oid}" {{}}
+        # Outposts require physical hardware — just list existing ones
+        configs = [{
+            "service": "outposts",
+            "action": "list_outposts",
+            "params": {},
+            "label": label,
+            "resource_type": "aws_outposts",
+            "is_lookup": True,
+        }]
 
-output "{oid}_outpost_arns" {{
-  value = data.aws_outposts_outposts.{oid}.arns
-}}
-'''
         return ToolResult(
-            node=ToolNode(id=oid, type="aws_outposts", label=params.get("label", oid),
-                          config=ToolNodeConfig(extra={"site_name": params.get("site_name", "on-prem-dc")})),
-            terraform_code={"compute.tf": tf_code},
+            node=ToolNode(id=oid, type="aws_outposts", label=label,
+                          config=ToolNodeConfig(extra={"site_name": site_name})),
+            boto3_config={"outposts": configs},
         )

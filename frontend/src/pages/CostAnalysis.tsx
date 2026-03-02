@@ -12,7 +12,7 @@ import {
     ChevronDown,
     Clock,
 } from 'lucide-react';
-import { getCostSummary, getCostForecast, getCostRecommendations } from '../api/costAnalysis';
+import { getCostSummary, getCostForecast, getCostRecommendations, getCostServices } from '../api/costAnalysis';
 import type {
     CostSummary,
     CostForecast,
@@ -181,6 +181,8 @@ export const CostAnalysis: React.FC = () => {
     const [granularity, setGranularity] = useState<'DAILY' | 'MONTHLY'>('MONTHLY');
     const [groupBy, setGroupBy] = useState<'SERVICE' | 'REGION' | 'USAGE_TYPE'>('SERVICE');
     const [showCustomRange, setShowCustomRange] = useState(false);
+    const [filterService, setFilterService] = useState('');
+    const [availableServices, setAvailableServices] = useState<string[]>([]);
 
     // Initialize with default preset
     useEffect(() => {
@@ -191,6 +193,13 @@ export const CostAnalysis: React.FC = () => {
             setEndDate(range.end);
             setGranularity(range.granularity);
         }
+    }, []);
+
+    // Fetch available services for filter dropdown
+    useEffect(() => {
+        getCostServices()
+            .then((res) => setAvailableServices(res.services || []))
+            .catch(() => setAvailableServices([]));
     }, []);
 
     const fetchData = useCallback(async () => {
@@ -207,6 +216,7 @@ export const CostAnalysis: React.FC = () => {
                     end_date: endDate,
                     granularity,
                     group_by: groupBy,
+                    filter_service: filterService || undefined,
                 }),
                 getCostForecast({
                     ...forecastRange,
@@ -233,7 +243,7 @@ export const CostAnalysis: React.FC = () => {
         } finally {
             setLoading(false);
         }
-    }, [startDate, endDate, granularity, groupBy]);
+    }, [startDate, endDate, granularity, groupBy, filterService]);
 
     useEffect(() => {
         fetchData();
@@ -251,6 +261,7 @@ export const CostAnalysis: React.FC = () => {
     const applyCustomRange = () => {
         setActivePreset('Custom');
         setShowCustomRange(false);
+        // fetchData is triggered via useEffect on [fetchData] which depends on startDate/endDate
     };
 
     // ── Derived data ───────────────────────────────────────────
@@ -336,8 +347,23 @@ export const CostAnalysis: React.FC = () => {
                             </button>
                         </div>
 
-                        {/* Group By + Granularity */}
-                        <div className="flex items-center gap-2">
+                        {/* Group By + Granularity + Service Filter */}
+                        <div className="flex items-center gap-2 flex-wrap">
+                            {availableServices.length > 0 && (
+                                <div className="relative">
+                                    <select
+                                        value={filterService}
+                                        onChange={(e) => setFilterService(e.target.value)}
+                                        className="appearance-none bg-white/[0.06] border border-border/50 rounded-lg px-3 py-1.5 pr-7 text-xs font-medium text-foreground cursor-pointer focus:outline-none focus:border-primary/50"
+                                    >
+                                        <option value="">All Services</option>
+                                        {availableServices.map((svc) => (
+                                            <option key={svc} value={svc}>{svc}</option>
+                                        ))}
+                                    </select>
+                                    <ChevronDown size={10} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+                                </div>
+                            )}
                             <div className="relative">
                                 <select
                                     value={groupBy}

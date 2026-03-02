@@ -1,5 +1,5 @@
 """
-WebSocket route — streams Terraform execution logs in real-time.
+WebSocket route — streams deployment execution logs in real-time.
 """
 
 import asyncio
@@ -14,11 +14,11 @@ router = APIRouter(tags=["websocket"])
 
 
 @router.websocket("/projects/{project_id}/logs")
-async def stream_terraform_logs(websocket: WebSocket, project_id: int) -> None:
+async def stream_deploy_logs(websocket: WebSocket, project_id: int) -> None:
     """
-    WebSocket endpoint to stream Terraform execution logs.
+    WebSocket endpoint to stream deployment execution logs.
 
-    Subscribes to Redis pub/sub channel `terraform_logs:{project_id}`
+    Subscribes to Redis pub/sub channel `deploy_logs:{project_id}`
     and forwards messages to the WebSocket client.
     """
     await websocket.accept()
@@ -32,7 +32,7 @@ async def stream_terraform_logs(websocket: WebSocket, project_id: int) -> None:
 
             redis_client = aioredis.from_url(settings.REDIS_URL)
             pubsub = redis_client.pubsub()
-            await pubsub.subscribe(f"terraform_logs:{project_id}")
+            await pubsub.subscribe(f"deploy_logs:{project_id}")
 
             while True:
                 message = await pubsub.get_message(

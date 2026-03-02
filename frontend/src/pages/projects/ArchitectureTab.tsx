@@ -306,15 +306,15 @@ export const ArchitectureTab: React.FC<Props> = ({ projectId }) => {
                                 ) : (
                                     <div className="flex-1 h-full overflow-auto p-4">
                                         <p className="text-[10px] uppercase tracking-wider text-white/20 font-semibold mb-3 sticky top-0 bg-[#0d1117] pb-2 z-10">
-                                            Terraform Configuration
+                                            AWS Configuration (Boto3)
                                         </p>
-                                        {architecture.terraform_files?.files['main.tf'] ? (
+                                        {architecture.terraform_files?.files && Object.keys(architecture.terraform_files.files).length > 0 ? (
                                             <pre className="text-[12px] leading-[1.7] text-emerald-200/70 font-mono whitespace-pre-wrap selection:bg-primary/30">
-                                                {architecture.terraform_files.files['main.tf']}
+                                                {JSON.stringify(architecture.terraform_files.files, null, 2)}
                                             </pre>
                                         ) : (
                                             <p className="text-muted-foreground/30 text-sm italic">
-                                                No Terraform code generated yet.
+                                                No AWS configuration generated yet.
                                             </p>
                                         )}
                                     </div>

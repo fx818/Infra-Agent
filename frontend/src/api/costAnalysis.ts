@@ -19,3 +19,8 @@ export const getCostRecommendations = async (): Promise<CostAnalysisResponse> =>
     const response = await api.get('/cost-analysis/recommendations');
     return response.data;
 };
+
+export const getCostServices = async (): Promise<{ services: string[] }> => {
+    const response = await api.get('/cost-analysis/services');
+    return response.data;
+};

@@ -1,4 +1,4 @@
-"""Application tools: SES, Pinpoint, Amplify, MediaConvert, Location, IoT Core, Connect."""
+"""Application tools: SES, Pinpoint, Amplify, MediaConvert, Location, IoT Core, Connect — provisions via boto3."""
 from typing import Any
 from app.tools.base import BaseTool, ToolResult, ToolNode, ToolNodeConfig
 
@@ -18,21 +18,36 @@ class CreateSESIdentityTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         sid = params["ses_id"]
+        label = params.get("label", sid)
         identity = params["email_or_domain"]
         is_domain = "@" not in identity
+
         if is_domain:
-            tf_code = f'''resource "aws_ses_domain_identity" "{sid}" {{
-  domain = "{identity}"
-}}
-'''
+            configs = [{
+                "service": "sesv2",
+                "action": "create_email_identity",
+                "params": {"EmailIdentity": identity, "Tags": [{"Key": "Name", "Value": f"__PROJECT__-{sid}"}]},
+                "label": label,
+                "resource_type": "aws_ses_domain",
+                "resource_id_path": "IdentityType",
+                "delete_action": "delete_email_identity",
+                "delete_params": {"EmailIdentity": identity},
+            }]
         else:
-            tf_code = f'''resource "aws_ses_email_identity" "{sid}" {{
-  email = "{identity}"
-}}
-'''
+            configs = [{
+                "service": "sesv2",
+                "action": "create_email_identity",
+                "params": {"EmailIdentity": identity, "Tags": [{"Key": "Name", "Value": f"__PROJECT__-{sid}"}]},
+                "label": label,
+                "resource_type": "aws_ses_email",
+                "resource_id_path": "IdentityType",
+                "delete_action": "delete_email_identity",
+                "delete_params": {"EmailIdentity": identity},
+            }]
+
         return ToolResult(
-            node=ToolNode(id=sid, type="aws_ses", label=params.get("label", sid), config=ToolNodeConfig()),
-            terraform_code={"application.tf": tf_code},
+            node=ToolNode(id=sid, type="aws_ses", label=label, config=ToolNodeConfig()),
+            boto3_config={"sesv2": configs},
         )
 
 
@@ -42,22 +57,26 @@ class CreatePinpointAppTool(BaseTool):
     category = "application"
     parameters = {
         "type": "object",
-        "properties": {
-            "pinpoint_id": {"type": "string"}, "label": {"type": "string"},
-        },
+        "properties": {"pinpoint_id": {"type": "string"}, "label": {"type": "string"}},
         "required": ["pinpoint_id", "label"],
     }
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         pid = params["pinpoint_id"]
-        tf_code = f'''resource "aws_pinpoint_app" "{pid}" {{
-  name = "${{var.project_name}}-{pid}"
-  tags = {{ Name = "${{var.project_name}}-{pid}" }}
-}}
-'''
+        label = params.get("label", pid)
+        configs = [{
+            "service": "pinpoint",
+            "action": "create_app",
+            "params": {"CreateApplicationRequest": {"Name": f"__PROJECT__-{pid}", "tags": {"Name": f"__PROJECT__-{pid}"}}},
+            "label": label,
+            "resource_type": "aws_pinpoint",
+            "resource_id_path": "ApplicationResponse.Id",
+            "delete_action": "delete_app",
+            "delete_params_key": "ApplicationId",
+        }]
         return ToolResult(
-            node=ToolNode(id=pid, type="aws_pinpoint", label=params.get("label", pid), config=ToolNodeConfig()),
-            terraform_code={"application.tf": tf_code},
+            node=ToolNode(id=pid, type="aws_pinpoint", label=label, config=ToolNodeConfig()),
+            boto3_config={"pinpoint": configs},
         )
 
 
@@ -77,16 +96,27 @@ class CreateAmplifyAppTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         aid = params["amplify_id"]
-        tf_code = f'''resource "aws_amplify_app" "{aid}" {{
-  name = "${{var.project_name}}-{aid}"
-  {"repository = \"" + params['repository'] + '"' if params.get('repository') else ""}
-  platform = "WEB"
-  tags = {{ Name = "${{var.project_name}}-{aid}" }}
-}}
-'''
+        label = params.get("label", aid)
+        create_params: dict[str, Any] = {
+            "name": f"__PROJECT__-{aid}",
+            "platform": "WEB",
+            "tags": {"Name": f"__PROJECT__-{aid}"},
+        }
+        if params.get("repository"):
+            create_params["repository"] = params["repository"]
+        configs = [{
+            "service": "amplify",
+            "action": "create_app",
+            "params": create_params,
+            "label": label,
+            "resource_type": "aws_amplify",
+            "resource_id_path": "app.appId",
+            "delete_action": "delete_app",
+            "delete_params_key": "appId",
+        }]
         return ToolResult(
-            node=ToolNode(id=aid, type="aws_amplify", label=params.get("label", aid), config=ToolNodeConfig()),
-            terraform_code={"application.tf": tf_code},
+            node=ToolNode(id=aid, type="aws_amplify", label=label, config=ToolNodeConfig()),
+            boto3_config={"amplify": configs},
         )
 
 
@@ -105,15 +135,24 @@ class CreateMediaConvertJobTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         mid = params["mc_id"]
-        tf_code = f'''resource "aws_media_convert_queue" "{mid}" {{
-  name         = "${{var.project_name}}-{mid}"
-  pricing_plan = "{params.get('pricing_plan', 'ON_DEMAND')}"
-  tags = {{ Name = "${{var.project_name}}-{mid}" }}
-}}
-'''
+        label = params.get("label", mid)
+        configs = [{
+            "service": "mediaconvert",
+            "action": "create_queue",
+            "params": {
+                "Name": f"__PROJECT__-{mid}",
+                "PricingPlan": params.get("pricing_plan", "ON_DEMAND"),
+                "Tags": {"Name": f"__PROJECT__-{mid}"},
+            },
+            "label": label,
+            "resource_type": "aws_mediaconvert",
+            "resource_id_path": "Queue.Arn",
+            "delete_action": "delete_queue",
+            "delete_params": {"Name": f"__PROJECT__-{mid}"},
+        }]
         return ToolResult(
-            node=ToolNode(id=mid, type="aws_mediaconvert", label=params.get("label", mid), config=ToolNodeConfig()),
-            terraform_code={"application.tf": tf_code},
+            node=ToolNode(id=mid, type="aws_mediaconvert", label=label, config=ToolNodeConfig()),
+            boto3_config={"mediaconvert": configs},
         )
 
 
@@ -123,22 +162,29 @@ class CreateLocationTrackerTool(BaseTool):
     category = "application"
     parameters = {
         "type": "object",
-        "properties": {
-            "tracker_id": {"type": "string"}, "label": {"type": "string"},
-        },
+        "properties": {"tracker_id": {"type": "string"}, "label": {"type": "string"}},
         "required": ["tracker_id", "label"],
     }
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         tid = params["tracker_id"]
-        tf_code = f'''resource "aws_location_tracker" "{tid}" {{
-  tracker_name = "${{var.project_name}}-{tid}"
-  tags = {{ Name = "${{var.project_name}}-{tid}" }}
-}}
-'''
+        label = params.get("label", tid)
+        configs = [{
+            "service": "location",
+            "action": "create_tracker",
+            "params": {
+                "TrackerName": f"__PROJECT__-{tid}",
+                "Tags": {"Name": f"__PROJECT__-{tid}"},
+            },
+            "label": label,
+            "resource_type": "aws_location_tracker",
+            "resource_id_path": "TrackerName",
+            "delete_action": "delete_tracker",
+            "delete_params": {"TrackerName": f"__PROJECT__-{tid}"},
+        }]
         return ToolResult(
-            node=ToolNode(id=tid, type="aws_location", label=params.get("label", tid), config=ToolNodeConfig()),
-            terraform_code={"application.tf": tf_code},
+            node=ToolNode(id=tid, type="aws_location", label=label, config=ToolNodeConfig()),
+            boto3_config={"location": configs},
         )
 
 
@@ -157,13 +203,23 @@ class CreateIoTThingTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         iid = params["iot_id"]
-        tf_code = f'''resource "aws_iot_thing" "{iid}" {{
-  name = "${{var.project_name}}-{iid}"
-}}
-'''
+        label = params.get("label", iid)
+        create_params: dict[str, Any] = {"thingName": f"__PROJECT__-{iid}"}
+        if params.get("thing_type"):
+            create_params["thingTypeName"] = params["thing_type"]
+        configs = [{
+            "service": "iot",
+            "action": "create_thing",
+            "params": create_params,
+            "label": label,
+            "resource_type": "aws_iot_thing",
+            "resource_id_path": "thingName",
+            "delete_action": "delete_thing",
+            "delete_params": {"thingName": f"__PROJECT__-{iid}"},
+        }]
         return ToolResult(
-            node=ToolNode(id=iid, type="aws_iot", label=params.get("label", iid), config=ToolNodeConfig()),
-            terraform_code={"application.tf": tf_code},
+            node=ToolNode(id=iid, type="aws_iot", label=label, config=ToolNodeConfig()),
+            boto3_config={"iot": configs},
         )
 
 
@@ -182,14 +238,23 @@ class CreateConnectInstanceTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         cid = params["connect_id"]
-        tf_code = f'''resource "aws_connect_instance" "{cid}" {{
-  instance_alias            = "${{var.project_name}}-{cid}"
-  identity_management_type  = "{params.get('identity_management_type', 'CONNECT_MANAGED')}"
-  inbound_calls_enabled     = true
-  outbound_calls_enabled    = true
-}}
-'''
+        label = params.get("label", cid)
+        configs = [{
+            "service": "connect",
+            "action": "create_instance",
+            "params": {
+                "InstanceAlias": f"__PROJECT__-{cid}",
+                "IdentityManagementType": params.get("identity_management_type", "CONNECT_MANAGED"),
+                "InboundCallsEnabled": True,
+                "OutboundCallsEnabled": True,
+            },
+            "label": label,
+            "resource_type": "aws_connect",
+            "resource_id_path": "Id",
+            "delete_action": "delete_instance",
+            "delete_params_key": "InstanceId",
+        }]
         return ToolResult(
-            node=ToolNode(id=cid, type="aws_connect", label=params.get("label", cid), config=ToolNodeConfig()),
-            terraform_code={"application.tf": tf_code},
+            node=ToolNode(id=cid, type="aws_connect", label=label, config=ToolNodeConfig()),
+            boto3_config={"connect": configs},
         )

@@ -29,13 +29,13 @@ export const Layout: React.FC = () => {
     };
 
     const navItems = [
-        { label: 'Dashboard', path: '/', icon: LayoutDashboard },
         { label: 'New Project', path: '/projects/new', icon: Plus },
-        { label: 'Deployments', path: '/deployments', icon: Server },
-        { label: 'Monitoring', path: '/monitoring', icon: Activity },
-        { label: 'Cost Analysis', path: '/cost-analysis', icon: DollarSign },
+        { label: 'Dashboard', path: '/', icon: LayoutDashboard },
+        { label: 'Drag n Build', path: '/drag-build', icon: Blocks },
         { label: 'AWS Explorer', path: '/aws-explorer', icon: Globe },
-        { label: 'Drag Build', path: '/drag-build', icon: Blocks },
+        { label: 'Deployments', path: '/deployments', icon: Server },
+        { label: 'Cost Analysis', path: '/cost-analysis', icon: DollarSign },
+        { label: 'Monitoring', path: '/monitoring', icon: Activity },
         { label: 'Logs', path: '/logs', icon: ScrollText },
         { label: 'Settings', path: '/settings', icon: Settings },
     ];

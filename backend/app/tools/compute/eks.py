@@ -1,4 +1,5 @@
-"""Create EKS Cluster tool."""
+"""Create EKS Cluster tool — provisions via boto3."""
+import json
 from typing import Any
 from app.tools.base import BaseTool, ToolResult, ToolNode, ToolNodeConfig
 
@@ -33,70 +34,119 @@ class CreateEKSClusterTool(BaseTool):
         mn = params.get("min_nodes", 1)
         mx = params.get("max_nodes", 4)
 
-        tf_code = f'''resource "aws_eks_cluster" "{cid}" {{
-  name     = "${{var.project_name}}-{cid}"
-  role_arn = aws_iam_role.{cid}_role.arn
-  version  = "{k8s_ver}"
+        configs = [
+            # 1. EKS cluster IAM role
+            {
+                "service": "iam",
+                "action": "create_role",
+                "params": {
+                    "RoleName": f"__PROJECT__-{cid}-cluster-role",
+                    "AssumeRolePolicyDocument": json.dumps({
+                        "Version": "2012-10-17",
+                        "Statement": [{"Action": "sts:AssumeRole", "Effect": "Allow", "Principal": {"Service": "eks.amazonaws.com"}}],
+                    }),
+                },
+                "label": f"{label} — Cluster Role",
+                "resource_type": "aws_iam_role",
+                "resource_id_path": "Role.Arn",
+                "delete_action": "delete_role",
+                "delete_params": {"RoleName": f"__PROJECT__-{cid}-cluster-role"},
+            },
+            {
+                "service": "iam",
+                "action": "attach_role_policy",
+                "params": {
+                    "RoleName": f"__PROJECT__-{cid}-cluster-role",
+                    "PolicyArn": "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy",
+                },
+                "label": f"{label} — Cluster Policy",
+                "resource_type": "aws_iam_policy_attachment",
+                "is_support": True,
+                "delete_action": "detach_role_policy",
+                "delete_params": {"RoleName": f"__PROJECT__-{cid}-cluster-role", "PolicyArn": "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"},
+            },
+            # 2. Node group IAM role
+            {
+                "service": "iam",
+                "action": "create_role",
+                "params": {
+                    "RoleName": f"__PROJECT__-{cid}-node-role",
+                    "AssumeRolePolicyDocument": json.dumps({
+                        "Version": "2012-10-17",
+                        "Statement": [{"Action": "sts:AssumeRole", "Effect": "Allow", "Principal": {"Service": "ec2.amazonaws.com"}}],
+                    }),
+                },
+                "label": f"{label} — Node Role",
+                "resource_type": "aws_iam_role",
+                "resource_id_path": "Role.Arn",
+                "delete_action": "delete_role",
+                "delete_params": {"RoleName": f"__PROJECT__-{cid}-node-role"},
+            },
+            {
+                "service": "iam",
+                "action": "attach_role_policy",
+                "params": {"RoleName": f"__PROJECT__-{cid}-node-role", "PolicyArn": "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"},
+                "label": f"{label} — Worker Policy", "resource_type": "aws_iam_policy_attachment", "is_support": True,
+                "delete_action": "detach_role_policy",
+                "delete_params": {"RoleName": f"__PROJECT__-{cid}-node-role", "PolicyArn": "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"},
+            },
+            {
+                "service": "iam",
+                "action": "attach_role_policy",
+                "params": {"RoleName": f"__PROJECT__-{cid}-node-role", "PolicyArn": "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"},
+                "label": f"{label} — CNI Policy", "resource_type": "aws_iam_policy_attachment", "is_support": True,
+                "delete_action": "detach_role_policy",
+                "delete_params": {"RoleName": f"__PROJECT__-{cid}-node-role", "PolicyArn": "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"},
+            },
+            {
+                "service": "iam",
+                "action": "attach_role_policy",
+                "params": {"RoleName": f"__PROJECT__-{cid}-node-role", "PolicyArn": "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"},
+                "label": f"{label} — ECR Policy", "resource_type": "aws_iam_policy_attachment", "is_support": True,
+                "delete_action": "detach_role_policy",
+                "delete_params": {"RoleName": f"__PROJECT__-{cid}-node-role", "PolicyArn": "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"},
+            },
+            # 3. Create EKS cluster
+            {
+                "service": "eks",
+                "action": "create_cluster",
+                "params": {
+                    "name": f"__PROJECT__-{cid}",
+                    "version": k8s_ver,
+                    "roleArn": f"__RESOLVE__:iam:create_role:{cid}-cluster-role:Role.Arn",
+                    "resourcesVpcConfig": {"subnetIds": "__DEFAULT_SUBNETS__"},
+                    "tags": {"Name": f"__PROJECT__-{cid}"},
+                },
+                "label": label,
+                "resource_type": "aws_eks_cluster",
+                "resource_id_path": "cluster.arn",
+                "delete_action": "delete_cluster",
+                "delete_params": {"name": f"__PROJECT__-{cid}"},
+                "waiter": "cluster_active",
+            },
+            # 4. Create node group
+            {
+                "service": "eks",
+                "action": "create_nodegroup",
+                "params": {
+                    "clusterName": f"__PROJECT__-{cid}",
+                    "nodegroupName": f"__PROJECT__-{cid}-nodes",
+                    "nodeRole": f"__RESOLVE__:iam:create_role:{cid}-node-role:Role.Arn",
+                    "subnets": "__DEFAULT_SUBNETS__",
+                    "instanceTypes": [inst_type],
+                    "scalingConfig": {"desiredSize": desired, "minSize": mn, "maxSize": mx},
+                },
+                "label": f"{label} — Node Group",
+                "resource_type": "aws_eks_node_group",
+                "resource_id_path": "nodegroup.nodegroupArn",
+                "delete_action": "delete_nodegroup",
+                "delete_params": {"clusterName": f"__PROJECT__-{cid}", "nodegroupName": f"__PROJECT__-{cid}-nodes"},
+                "waiter": "nodegroup_active",
+            },
+        ]
 
-  vpc_config {{
-    subnet_ids = [for s in aws_subnet.public : s.id]
-  }}
-
-  tags = {{ Name = "${{var.project_name}}-{cid}" }}
-}}
-
-resource "aws_eks_node_group" "{cid}_nodes" {{
-  cluster_name    = aws_eks_cluster.{cid}.name
-  node_group_name = "${{var.project_name}}-{cid}-nodes"
-  node_role_arn   = aws_iam_role.{cid}_node_role.arn
-  subnet_ids      = [for s in aws_subnet.public : s.id]
-  instance_types  = ["{inst_type}"]
-
-  scaling_config {{
-    desired_size = {desired}
-    min_size     = {mn}
-    max_size     = {mx}
-  }}
-}}
-
-resource "aws_iam_role" "{cid}_role" {{
-  name = "${{var.project_name}}-{cid}-cluster-role"
-  assume_role_policy = jsonencode({{
-    Version = "2012-10-17"
-    Statement = [{{ Action = "sts:AssumeRole", Effect = "Allow", Principal = {{ Service = "eks.amazonaws.com" }} }}]
-  }})
-}}
-
-resource "aws_iam_role_policy_attachment" "{cid}_cluster_policy" {{
-  role       = aws_iam_role.{cid}_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
-}}
-
-resource "aws_iam_role" "{cid}_node_role" {{
-  name = "${{var.project_name}}-{cid}-node-role"
-  assume_role_policy = jsonencode({{
-    Version = "2012-10-17"
-    Statement = [{{ Action = "sts:AssumeRole", Effect = "Allow", Principal = {{ Service = "ec2.amazonaws.com" }} }}]
-  }})
-}}
-
-resource "aws_iam_role_policy_attachment" "{cid}_worker_policy" {{
-  role       = aws_iam_role.{cid}_node_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
-}}
-
-resource "aws_iam_role_policy_attachment" "{cid}_cni_policy" {{
-  role       = aws_iam_role.{cid}_node_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
-}}
-
-resource "aws_iam_role_policy_attachment" "{cid}_ecr_policy" {{
-  role       = aws_iam_role.{cid}_node_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
-}}
-'''
         return ToolResult(
             node=ToolNode(id=cid, type="aws_eks", label=label,
                           config=ToolNodeConfig(instance_type=inst_type, extra={"kubernetes_version": k8s_ver, "desired_nodes": desired})),
-            terraform_code={"compute.tf": tf_code},
+            boto3_config={"eks": configs},
         )

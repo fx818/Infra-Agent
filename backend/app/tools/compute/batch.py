@@ -1,4 +1,5 @@
-"""Create AWS Batch Job tool."""
+"""Create AWS Batch Job tool — provisions via boto3."""
+import json
 from typing import Any
 from app.tools.base import BaseTool, ToolResult, ToolNode, ToolNodeConfig
 
@@ -20,45 +21,74 @@ class CreateBatchJobTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         bid = params["batch_id"]
+        label = params.get("label", bid)
         ctype = params.get("compute_type", "FARGATE")
         vcpus = params.get("max_vcpus", 16)
-        tf_code = f'''resource "aws_batch_compute_environment" "{bid}" {{
-  compute_environment_name = "${{var.project_name}}-{bid}"
-  type                     = "MANAGED"
-  compute_resources {{
-    type      = "{ctype}"
-    max_vcpus = {vcpus}
-    subnets   = [for s in aws_subnet.public : s.id]
-    security_group_ids = []
-  }}
-  service_role = aws_iam_role.{bid}_batch_role.arn
-}}
 
-resource "aws_batch_job_queue" "{bid}_queue" {{
-  name     = "${{var.project_name}}-{bid}-queue"
-  state    = "ENABLED"
-  priority = 1
-  compute_environment_order {{
-    order               = 1
-    compute_environment = aws_batch_compute_environment.{bid}.arn
-  }}
-}}
+        configs = [
+            {
+                "service": "iam",
+                "action": "create_role",
+                "params": {
+                    "RoleName": f"__PROJECT__-{bid}-batch-role",
+                    "AssumeRolePolicyDocument": json.dumps({
+                        "Version": "2012-10-17",
+                        "Statement": [{"Action": "sts:AssumeRole", "Effect": "Allow", "Principal": {"Service": "batch.amazonaws.com"}}],
+                    }),
+                },
+                "label": f"{label} — Batch Role",
+                "resource_type": "aws_iam_role",
+                "resource_id_path": "Role.Arn",
+                "delete_action": "delete_role",
+                "delete_params": {"RoleName": f"__PROJECT__-{bid}-batch-role"},
+            },
+            {
+                "service": "iam",
+                "action": "attach_role_policy",
+                "params": {"RoleName": f"__PROJECT__-{bid}-batch-role", "PolicyArn": "arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole"},
+                "label": f"{label} — Batch Policy", "resource_type": "aws_iam_policy_attachment", "is_support": True,
+                "delete_action": "detach_role_policy",
+                "delete_params": {"RoleName": f"__PROJECT__-{bid}-batch-role", "PolicyArn": "arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole"},
+            },
+            {
+                "service": "batch",
+                "action": "create_compute_environment",
+                "params": {
+                    "computeEnvironmentName": f"__PROJECT__-{bid}",
+                    "type": "MANAGED",
+                    "computeResources": {
+                        "type": ctype,
+                        "maxvCpus": vcpus,
+                        "subnets": "__DEFAULT_SUBNETS__",
+                        "securityGroupIds": "__DEFAULT_SG__",
+                    },
+                    "serviceRole": f"__RESOLVE__:iam:create_role:{bid}-batch-role:Role.Arn",
+                },
+                "label": f"{label} — Compute Env",
+                "resource_type": "aws_batch_compute_environment",
+                "resource_id_path": "computeEnvironmentArn",
+                "delete_action": "delete_compute_environment",
+                "delete_params": {"computeEnvironment": f"__PROJECT__-{bid}"},
+            },
+            {
+                "service": "batch",
+                "action": "create_job_queue",
+                "params": {
+                    "jobQueueName": f"__PROJECT__-{bid}-queue",
+                    "state": "ENABLED",
+                    "priority": 1,
+                    "computeEnvironmentOrder": [{"order": 1, "computeEnvironment": f"__PROJECT__-{bid}"}],
+                },
+                "label": f"{label} — Job Queue",
+                "resource_type": "aws_batch_job_queue",
+                "resource_id_path": "jobQueueArn",
+                "delete_action": "delete_job_queue",
+                "delete_params": {"jobQueue": f"__PROJECT__-{bid}-queue"},
+            },
+        ]
 
-resource "aws_iam_role" "{bid}_batch_role" {{
-  name = "${{var.project_name}}-{bid}-batch-role"
-  assume_role_policy = jsonencode({{
-    Version = "2012-10-17"
-    Statement = [{{ Action = "sts:AssumeRole", Effect = "Allow", Principal = {{ Service = "batch.amazonaws.com" }} }}]
-  }})
-}}
-
-resource "aws_iam_role_policy_attachment" "{bid}_batch_policy" {{
-  role       = aws_iam_role.{bid}_batch_role.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole"
-}}
-'''
         return ToolResult(
-            node=ToolNode(id=bid, type="aws_batch", label=params.get("label", bid),
+            node=ToolNode(id=bid, type="aws_batch", label=label,
                           config=ToolNodeConfig(extra={"compute_type": ctype, "max_vcpus": vcpus})),
-            terraform_code={"compute.tf": tf_code},
+            boto3_config={"batch": configs},
         )

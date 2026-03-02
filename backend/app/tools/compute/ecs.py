@@ -1,4 +1,5 @@
-"""Create ECS Service tool — uses shared VPC infrastructure across multiple services."""
+"""Create ECS Service tool — provisions via boto3."""
+import json
 from typing import Any
 from app.tools.base import BaseTool, ToolResult, ToolNode, ToolNodeConfig
 
@@ -13,73 +14,6 @@ _FARGATE_VALID = {
     8192: list(range(16384, 61441, 4096)),
     16384: list(range(32768, 122881, 8192)),
 }
-
-# Shared VPC terraform — written once, deduplicated at workspace level
-_SHARED_ECS_NETWORKING = '''# ============================================================
-# Shared ECS Networking (used by all ECS services)
-# ============================================================
-data "aws_availability_zones" "ecs_azs" {
-  state = "available"
-}
-
-resource "aws_vpc" "shared_ecs_vpc" {
-  cidr_block           = "10.100.0.0/16"
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-  tags = {
-    Name = join("-", [var.project_name, "ecs-vpc"])
-  }
-}
-
-resource "aws_internet_gateway" "shared_ecs_igw" {
-  vpc_id = aws_vpc.shared_ecs_vpc.id
-  tags = {
-    Name = join("-", [var.project_name, "ecs-igw"])
-  }
-}
-
-resource "aws_subnet" "shared_ecs_subnet_a" {
-  vpc_id                  = aws_vpc.shared_ecs_vpc.id
-  cidr_block              = "10.100.1.0/24"
-  availability_zone       = data.aws_availability_zones.ecs_azs.names[0]
-  map_public_ip_on_launch = true
-  tags = {
-    Name = join("-", [var.project_name, "ecs-subnet-a"])
-  }
-}
-
-resource "aws_subnet" "shared_ecs_subnet_b" {
-  vpc_id                  = aws_vpc.shared_ecs_vpc.id
-  cidr_block              = "10.100.2.0/24"
-  availability_zone       = data.aws_availability_zones.ecs_azs.names[1]
-  map_public_ip_on_launch = true
-  tags = {
-    Name = join("-", [var.project_name, "ecs-subnet-b"])
-  }
-}
-
-resource "aws_route_table" "shared_ecs_rt" {
-  vpc_id = aws_vpc.shared_ecs_vpc.id
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.shared_ecs_igw.id
-  }
-  tags = {
-    Name = join("-", [var.project_name, "ecs-rt"])
-  }
-}
-
-resource "aws_route_table_association" "shared_ecs_rta_a" {
-  subnet_id      = aws_subnet.shared_ecs_subnet_a.id
-  route_table_id = aws_route_table.shared_ecs_rt.id
-}
-
-resource "aws_route_table_association" "shared_ecs_rta_b" {
-  subnet_id      = aws_subnet.shared_ecs_subnet_b.id
-  route_table_id = aws_route_table.shared_ecs_rt.id
-}
-# ============================================================
-'''
 
 
 def _valid_fargate_combo(cpu: int, memory: int) -> tuple[int, int]:
@@ -146,107 +80,137 @@ class CreateECSServiceTool(BaseTool):
         port = params.get("container_port", 80)
         count = params.get("desired_count", 2)
         image = params.get("image", "nginx:latest")
-
-        # Service-specific safe name for AWS resources (hyphens, no underscores)
         safe_sid = sid.lower().replace("_", "-")
 
-        # Service-specific resources only — shared VPC is written via compute_shared.tf
-        service_tf = f'''
-# --- ECS Service: {safe_sid} ---
-resource "aws_security_group" "{sid}_sg" {{
-  name        = join("-", [var.project_name, "{safe_sid}", "sg"])
-  description = "Security group for {safe_sid} ECS service"
-  vpc_id      = aws_vpc.shared_ecs_vpc.id
-
-  ingress {{
-    from_port   = {port}
-    to_port     = {port}
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }}
-
-  egress {{
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }}
-
-  tags = {{
-    Name = join("-", [var.project_name, "{safe_sid}", "sg"])
-  }}
-}}
-
-resource "aws_ecs_cluster" "{sid}_cluster" {{
-  name = join("-", [var.project_name, "{safe_sid}"])
-}}
-
-resource "aws_iam_role" "{sid}_exec_role" {{
-  name = join("-", [var.project_name, "{safe_sid}", "exec-role"])
-  assume_role_policy = jsonencode({{
-    Version = "2012-10-17"
-    Statement = [{{
-      Action    = "sts:AssumeRole"
-      Effect    = "Allow"
-      Principal = {{ Service = "ecs-tasks.amazonaws.com" }}
-    }}]
-  }})
-}}
-
-resource "aws_iam_role_policy_attachment" "{sid}_exec_policy" {{
-  role       = aws_iam_role.{sid}_exec_role.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-}}
-
-resource "aws_cloudwatch_log_group" "{sid}_logs" {{
-  name              = "/ecs/{safe_sid}"
-  retention_in_days = 14
-}}
-
-resource "aws_ecs_task_definition" "{sid}_task" {{
-  family                   = join("-", [var.project_name, "{safe_sid}"])
-  network_mode             = "awsvpc"
-  requires_compatibilities = ["FARGATE"]
-  cpu                      = "{cpu}"
-  memory                   = "{memory}"
-  execution_role_arn       = aws_iam_role.{sid}_exec_role.arn
-
-  container_definitions = jsonencode([{{
-    name      = "{safe_sid}"
-    image     = "{image}"
-    cpu       = {cpu}
-    memory    = {memory}
-    essential = true
-    portMappings = [{{
-      containerPort = {port}
-      hostPort      = {port}
-      protocol      = "tcp"
-    }}]
-    logConfiguration = {{
-      logDriver = "awslogs"
-      options = {{
-        "awslogs-group"         = "/ecs/{safe_sid}"
-        "awslogs-region"        = var.region
-        "awslogs-stream-prefix" = "ecs"
-      }}
-    }}
-  }}])
-}}
-
-resource "aws_ecs_service" "{sid}" {{
-  name            = join("-", [var.project_name, "{safe_sid}"])
-  cluster         = aws_ecs_cluster.{sid}_cluster.id
-  task_definition = aws_ecs_task_definition.{sid}_task.arn
-  desired_count   = {count}
-  launch_type     = "FARGATE"
-
-  network_configuration {{
-    assign_public_ip = true
-    subnets          = [aws_subnet.shared_ecs_subnet_a.id, aws_subnet.shared_ecs_subnet_b.id]
-    security_groups  = [aws_security_group.{sid}_sg.id]
-  }}
-}}
-'''
+        configs = [
+            # 1. Create ECS cluster
+            {
+                "service": "ecs",
+                "action": "create_cluster",
+                "params": {
+                    "clusterName": f"__PROJECT__-{safe_sid}",
+                    "tags": [{"key": "Name", "value": f"__PROJECT__-{safe_sid}"}],
+                },
+                "label": f"{label} — ECS Cluster",
+                "resource_type": "aws_ecs_cluster",
+                "resource_id_path": "cluster.clusterArn",
+                "delete_action": "delete_cluster",
+                "delete_params": {"cluster": f"__PROJECT__-{safe_sid}"},
+            },
+            # 2. Create IAM execution role
+            {
+                "service": "iam",
+                "action": "create_role",
+                "params": {
+                    "RoleName": f"__PROJECT__-{safe_sid}-exec-role",
+                    "AssumeRolePolicyDocument": json.dumps({
+                        "Version": "2012-10-17",
+                        "Statement": [{
+                            "Effect": "Allow",
+                            "Principal": {"Service": "ecs-tasks.amazonaws.com"},
+                            "Action": "sts:AssumeRole",
+                        }],
+                    }),
+                },
+                "label": f"{label} — Execution Role",
+                "resource_type": "aws_iam_role",
+                "resource_id_path": "Role.Arn",
+                "delete_action": "delete_role",
+                "delete_params": {"RoleName": f"__PROJECT__-{safe_sid}-exec-role"},
+            },
+            # 3. Attach execution policy
+            {
+                "service": "iam",
+                "action": "attach_role_policy",
+                "params": {
+                    "RoleName": f"__PROJECT__-{safe_sid}-exec-role",
+                    "PolicyArn": "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy",
+                },
+                "label": f"{label} — Policy Attachment",
+                "resource_type": "aws_iam_policy_attachment",
+                "is_support": True,
+                "delete_action": "detach_role_policy",
+                "delete_params": {
+                    "RoleName": f"__PROJECT__-{safe_sid}-exec-role",
+                    "PolicyArn": "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy",
+                },
+            },
+            # 4. Create CloudWatch log group
+            {
+                "service": "logs",
+                "action": "create_log_group",
+                "params": {
+                    "logGroupName": f"/ecs/{safe_sid}",
+                    "tags": {"Name": f"__PROJECT__-{safe_sid}-logs"},
+                },
+                "label": f"{label} — Log Group",
+                "resource_type": "aws_cloudwatch_log_group",
+                "resource_id_path": None,
+                "delete_action": "delete_log_group",
+                "delete_params": {"logGroupName": f"/ecs/{safe_sid}"},
+            },
+            # 5. Register task definition
+            {
+                "service": "ecs",
+                "action": "register_task_definition",
+                "params": {
+                    "family": f"__PROJECT__-{safe_sid}",
+                    "networkMode": "awsvpc",
+                    "requiresCompatibilities": ["FARGATE"],
+                    "cpu": str(cpu),
+                    "memory": str(memory),
+                    "executionRoleArn": f"__RESOLVE__:iam:create_role:{safe_sid}-exec-role:Role.Arn",
+                    "containerDefinitions": [{
+                        "name": safe_sid,
+                        "image": image,
+                        "cpu": cpu,
+                        "memory": memory,
+                        "essential": True,
+                        "portMappings": [{"containerPort": port, "hostPort": port, "protocol": "tcp"}],
+                        "logConfiguration": {
+                            "logDriver": "awslogs",
+                            "options": {
+                                "awslogs-group": f"/ecs/{safe_sid}",
+                                "awslogs-region": "__REGION__",
+                                "awslogs-stream-prefix": "ecs",
+                            },
+                        },
+                    }],
+                },
+                "label": f"{label} — Task Definition",
+                "resource_type": "aws_ecs_task_definition",
+                "resource_id_path": "taskDefinition.taskDefinitionArn",
+                "delete_action": "deregister_task_definition",
+                "delete_params_key": "taskDefinition",
+            },
+            # 6. Create ECS service (needs VPC/subnets — handled by executor)
+            {
+                "service": "ecs",
+                "action": "create_service",
+                "params": {
+                    "cluster": f"__PROJECT__-{safe_sid}",
+                    "serviceName": f"__PROJECT__-{safe_sid}-svc",
+                    "taskDefinition": f"__PROJECT__-{safe_sid}",
+                    "desiredCount": count,
+                    "launchType": "FARGATE",
+                    "networkConfiguration": {
+                        "awsvpcConfiguration": {
+                            "subnets": "__DEFAULT_SUBNETS__",
+                            "assignPublicIp": "ENABLED",
+                        },
+                    },
+                },
+                "label": label,
+                "resource_type": "aws_ecs_service",
+                "resource_id_path": "service.serviceArn",
+                "delete_action": "delete_service",
+                "delete_params": {
+                    "cluster": f"__PROJECT__-{safe_sid}",
+                    "service": f"__PROJECT__-{safe_sid}-svc",
+                    "force": True,
+                },
+            },
+        ]
 
         return ToolResult(
             node=ToolNode(
@@ -258,8 +222,5 @@ resource "aws_ecs_service" "{sid}" {{
                     extra={"cpu": cpu, "container_port": port, "desired_count": count, "image": image},
                 ),
             ),
-            terraform_code={
-                "compute_shared.tf": _SHARED_ECS_NETWORKING,
-                "compute.tf": service_tf,
-            },
+            boto3_config={"ecs": configs},
         )

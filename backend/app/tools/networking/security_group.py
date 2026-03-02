@@ -1,4 +1,4 @@
-"""Create Security Group tool."""
+"""Create Security Group tool — provisions via boto3."""
 from typing import Any
 from app.tools.base import BaseTool, ToolResult, ToolNode, ToolNodeConfig
 
@@ -34,38 +34,52 @@ class CreateSecurityGroupTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         sid = params["sg_id"]
+        label = params.get("label", sid)
         vpc = params["vpc_id"]
         rules = params.get("ingress_rules", [{"from_port": 443, "to_port": 443, "protocol": "tcp", "cidr_blocks": ["0.0.0.0/0"]}])
-        ingress_blocks = ""
-        for r in rules:
-            cidrs = ', '.join(f'"{c}"' for c in r.get("cidr_blocks", ["0.0.0.0/0"]))
-            ingress_blocks += f'''
-  ingress {{
-    from_port   = {r.get('from_port', 443)}
-    to_port     = {r.get('to_port', 443)}
-    protocol    = "{r.get('protocol', 'tcp')}"
-    cidr_blocks = [{cidrs}]
-    description = "{r.get('description', '')}"
-  }}
-'''
-        tf_code = f'''resource "aws_security_group" "{sid}" {{
-  name        = "${{var.project_name}}-{sid}"
-  description = "{params.get('label', sid)}"
-  vpc_id      = aws_vpc.{vpc}.id
-{ingress_blocks}
-  egress {{
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }}
 
-  tags = {{ Name = "${{var.project_name}}-{sid}" }}
-}}
-'''
+        # Build ingress IP permissions
+        ip_permissions = []
+        for r in rules:
+            ip_permissions.append({
+                "IpProtocol": r.get("protocol", "tcp"),
+                "FromPort": r.get("from_port", 443),
+                "ToPort": r.get("to_port", 443),
+                "IpRanges": [{"CidrIp": c, "Description": r.get("description", "")} for c in r.get("cidr_blocks", ["0.0.0.0/0"])],
+            })
+
+        configs = [
+            {
+                "service": "ec2",
+                "action": "create_security_group",
+                "params": {
+                    "GroupName": f"__PROJECT__-{sid}",
+                    "Description": label,
+                    "VpcId": f"__RESOLVE_REF__:{vpc}",
+                    "TagSpecifications": [{"ResourceType": "security-group", "Tags": [{"Key": "Name", "Value": f"__PROJECT__-{sid}"}]}],
+                },
+                "label": label,
+                "resource_type": "aws_security_group",
+                "resource_id_path": "GroupId",
+                "delete_action": "delete_security_group",
+                "delete_params_key": "GroupId",
+            },
+            {
+                "service": "ec2",
+                "action": "authorize_security_group_ingress",
+                "params": {
+                    "GroupId": "__RESOLVE_PREV__",
+                    "IpPermissions": ip_permissions,
+                },
+                "label": f"{label} — Ingress Rules",
+                "resource_type": "aws_sg_rules",
+                "is_support": True,
+            },
+        ]
+
         return ToolResult(
-            node=ToolNode(id=sid, type="aws_security_group", label=params.get("label", sid),
+            node=ToolNode(id=sid, type="aws_security_group", label=label,
                           config=ToolNodeConfig(extra={"vpc_id": vpc, "rules_count": len(rules)})),
-            terraform_code={"networking.tf": tf_code},
+            boto3_config={"ec2": configs},
             edges=[{"from": vpc, "to": sid, "label": "contains"}],
         )

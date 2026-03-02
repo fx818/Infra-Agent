@@ -1,154 +1,114 @@
-"""Security tools: IAM, Cognito, KMS, Secrets Manager, WAF, Shield, ACM, GuardDuty."""
+"""Security tools: IAM Role, KMS, WAF, Shield, ACM, GuardDuty — provisions via boto3."""
+import json
 from typing import Any
 from app.tools.base import BaseTool, ToolResult, ToolNode, ToolNodeConfig
 
 
 class CreateIAMRoleTool(BaseTool):
     name = "create_iam_role"
-    description = "Create an AWS IAM role with trusted service principal and managed policies."
+    description = "Create an AWS IAM role with policies for service-to-service access."
     category = "security"
     parameters = {
         "type": "object",
         "properties": {
             "role_id": {"type": "string"}, "label": {"type": "string"},
-            "trusted_service": {"type": "string", "description": "AWS service principal (e.g., 'lambda.amazonaws.com').", "default": "lambda.amazonaws.com"},
-            "managed_policy_arns": {"type": "array", "items": {"type": "string"}, "default": []},
+            "service_principal": {"type": "string", "description": "AWS service (e.g., 'lambda.amazonaws.com').", "default": "lambda.amazonaws.com"},
+            "managed_policies": {"type": "array", "items": {"type": "string"}, "default": []},
         },
-        "required": ["role_id", "label", "trusted_service"],
+        "required": ["role_id", "label"],
     }
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         rid = params["role_id"]
-        policies = params.get("managed_policy_arns", [])
-        attachments = ""
-        for i, arn in enumerate(policies):
-            attachments += f'''
-resource "aws_iam_role_policy_attachment" "{rid}_policy_{i}" {{
-  role       = aws_iam_role.{rid}.name
-  policy_arn = "{arn}"
-}}
-'''
-        tf_code = f'''resource "aws_iam_role" "{rid}" {{
-  name = "${{var.project_name}}-{rid}"
-  assume_role_policy = jsonencode({{
-    Version = "2012-10-17"
-    Statement = [{{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
-      Principal = {{ Service = "{params.get('trusted_service', 'lambda.amazonaws.com')}" }}
-    }}]
-  }})
-  tags = {{ Name = "${{var.project_name}}-{rid}" }}
-}}
-{attachments}'''
+        label = params.get("label", rid)
+        service = params.get("service_principal", "lambda.amazonaws.com")
+        policies = params.get("managed_policies", [])
+
+        configs = [{
+            "service": "iam",
+            "action": "create_role",
+            "params": {
+                "RoleName": f"__PROJECT__-{rid}",
+                "AssumeRolePolicyDocument": json.dumps({
+                    "Version": "2012-10-17",
+                    "Statement": [{"Effect": "Allow", "Principal": {"Service": service}, "Action": "sts:AssumeRole"}],
+                }),
+                "Tags": [{"Key": "Name", "Value": f"__PROJECT__-{rid}"}],
+            },
+            "label": label,
+            "resource_type": "aws_iam_role",
+            "resource_id_path": "Role.Arn",
+            "delete_action": "delete_role",
+            "delete_params": {"RoleName": f"__PROJECT__-{rid}"},
+        }]
+
+        for policy_arn in policies:
+            configs.append({
+                "service": "iam",
+                "action": "attach_role_policy",
+                "params": {"RoleName": f"__PROJECT__-{rid}", "PolicyArn": policy_arn},
+                "label": f"{label} — Policy",
+                "resource_type": "aws_iam_policy_attachment",
+                "is_support": True,
+                "delete_action": "detach_role_policy",
+                "delete_params": {"RoleName": f"__PROJECT__-{rid}", "PolicyArn": policy_arn},
+            })
+
         return ToolResult(
-            node=ToolNode(id=rid, type="aws_iam", label=params.get("label", rid), config=ToolNodeConfig()),
-            terraform_code={"security.tf": tf_code},
-        )
-
-
-class CreateCognitoUserPoolTool(BaseTool):
-    name = "create_cognito_user_pool"
-    description = "Create an Amazon Cognito User Pool for user authentication and authorization."
-    category = "security"
-    parameters = {
-        "type": "object",
-        "properties": {
-            "pool_id": {"type": "string"}, "label": {"type": "string"},
-            "auto_verify": {"type": "array", "items": {"type": "string"}, "default": ["email"]},
-            "password_min_length": {"type": "integer", "default": 8},
-        },
-        "required": ["pool_id", "label"],
-    }
-
-    def execute(self, params: dict[str, Any]) -> ToolResult:
-        pid = params["pool_id"]
-        auto_verify = ', '.join(f'"{v}"' for v in params.get("auto_verify", ["email"]))
-        tf_code = f'''resource "aws_cognito_user_pool" "{pid}" {{
-  name                     = "${{var.project_name}}-{pid}"
-  auto_verified_attributes = [{auto_verify}]
-  password_policy {{
-    minimum_length = {params.get('password_min_length', 8)}
-  }}
-  tags = {{ Name = "${{var.project_name}}-{pid}" }}
-}}
-
-resource "aws_cognito_user_pool_client" "{pid}_client" {{
-  name         = "${{var.project_name}}-{pid}-client"
-  user_pool_id = aws_cognito_user_pool.{pid}.id
-  explicit_auth_flows = ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
-}}
-'''
-        return ToolResult(
-            node=ToolNode(id=pid, type="aws_cognito", label=params.get("label", pid), config=ToolNodeConfig()),
-            terraform_code={"security.tf": tf_code},
+            node=ToolNode(id=rid, type="aws_iam_role", label=label,
+                          config=ToolNodeConfig(extra={"service_principal": service})),
+            boto3_config={"iam": configs},
         )
 
 
 class CreateKMSKeyTool(BaseTool):
     name = "create_kms_key"
-    description = "Create an AWS KMS encryption key for data encryption."
+    description = "Create an AWS KMS key for encryption."
     category = "security"
     parameters = {
         "type": "object",
         "properties": {
             "key_id": {"type": "string"}, "label": {"type": "string"},
-            "key_usage": {"type": "string", "default": "ENCRYPT_DECRYPT"},
-            "rotation_enabled": {"type": "boolean", "default": True},
+            "description": {"type": "string", "default": "Application encryption key"},
+            "enable_rotation": {"type": "boolean", "default": True},
         },
         "required": ["key_id", "label"],
     }
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         kid = params["key_id"]
-        tf_code = f'''resource "aws_kms_key" "{kid}" {{
-  description             = "${{var.project_name}}-{kid}"
-  key_usage               = "{params.get('key_usage', 'ENCRYPT_DECRYPT')}"
-  enable_key_rotation     = {str(params.get('rotation_enabled', True)).lower()}
-  tags = {{ Name = "${{var.project_name}}-{kid}" }}
-}}
-
-resource "aws_kms_alias" "{kid}_alias" {{
-  name          = "alias/${{var.project_name}}-{kid}"
-  target_key_id = aws_kms_key.{kid}.key_id
-}}
-'''
+        label = params.get("label", kid)
+        configs = [{
+            "service": "kms",
+            "action": "create_key",
+            "params": {
+                "Description": params.get("description", "Application encryption key"),
+                "Tags": [{"TagKey": "Name", "TagValue": f"__PROJECT__-{kid}"}],
+            },
+            "label": label,
+            "resource_type": "aws_kms_key",
+            "resource_id_path": "KeyMetadata.KeyId",
+            "delete_action": "schedule_key_deletion",
+            "delete_params_key": "KeyId",
+        }]
+        if params.get("enable_rotation", True):
+            configs.append({
+                "service": "kms",
+                "action": "enable_key_rotation",
+                "params": {"KeyId": "__RESOLVE_PREV__"},
+                "label": f"{label} — Rotation",
+                "resource_type": "aws_kms_rotation",
+                "is_support": True,
+            })
         return ToolResult(
-            node=ToolNode(id=kid, type="aws_kms", label=params.get("label", kid), config=ToolNodeConfig()),
-            terraform_code={"security.tf": tf_code},
+            node=ToolNode(id=kid, type="aws_kms", label=label, config=ToolNodeConfig()),
+            boto3_config={"kms": configs},
         )
 
 
-class CreateSecretTool(BaseTool):
-    name = "create_secret"
-    description = "Create an AWS Secrets Manager secret for storing sensitive configuration."
-    category = "security"
-    parameters = {
-        "type": "object",
-        "properties": {
-            "secret_id": {"type": "string"}, "label": {"type": "string"},
-            "description": {"type": "string", "default": "Managed secret"},
-        },
-        "required": ["secret_id", "label"],
-    }
-
-    def execute(self, params: dict[str, Any]) -> ToolResult:
-        sid = params["secret_id"]
-        tf_code = f'''resource "aws_secretsmanager_secret" "{sid}" {{
-  name        = "${{var.project_name}}-{sid}"
-  description = "{params.get('description', 'Managed secret')}"
-  tags = {{ Name = "${{var.project_name}}-{sid}" }}
-}}
-'''
-        return ToolResult(
-            node=ToolNode(id=sid, type="aws_secrets_manager", label=params.get("label", sid), config=ToolNodeConfig()),
-            terraform_code={"security.tf": tf_code},
-        )
-
-
-class CreateWAFWebACLTool(BaseTool):
-    name = "create_waf_web_acl"
-    description = "Create an AWS WAF Web ACL for protecting web applications from common exploits."
+class CreateWAFACLTool(BaseTool):
+    name = "create_waf_acl"
+    description = "Create an AWS WAFv2 Web ACL for protecting web applications."
     category = "security"
     parameters = {
         "type": "object",
@@ -161,60 +121,72 @@ class CreateWAFWebACLTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         wid = params["waf_id"]
-        tf_code = f'''resource "aws_wafv2_web_acl" "{wid}" {{
-  name  = "${{var.project_name}}-{wid}"
-  scope = "{params.get('scope', 'REGIONAL')}"
-  default_action {{ allow {{}} }}
-  visibility_config {{
-    cloudwatch_metrics_enabled = true
-    metric_name                = "${{var.project_name}}-{wid}"
-    sampled_requests_enabled   = true
-  }}
-  tags = {{ Name = "${{var.project_name}}-{wid}" }}
-}}
-'''
+        label = params.get("label", wid)
+        scope = params.get("scope", "REGIONAL")
+        configs = [{
+            "service": "wafv2",
+            "action": "create_web_acl",
+            "params": {
+                "Name": f"__PROJECT__-{wid}",
+                "Scope": scope,
+                "DefaultAction": {"Allow": {}},
+                "VisibilityConfig": {
+                    "SampledRequestsEnabled": True,
+                    "CloudWatchMetricsEnabled": True,
+                    "MetricName": f"__PROJECT__-{wid}",
+                },
+                "Rules": [],
+            },
+            "label": label,
+            "resource_type": "aws_wafv2_web_acl",
+            "resource_id_path": "Summary.Id",
+            "delete_action": "delete_web_acl",
+            "delete_params": {"Name": f"__PROJECT__-{wid}", "Scope": scope, "Id": "__RESOURCE_ID__", "LockToken": "__LOCK_TOKEN__"},
+        }]
         return ToolResult(
-            node=ToolNode(id=wid, type="aws_waf", label=params.get("label", wid), config=ToolNodeConfig()),
-            terraform_code={"security.tf": tf_code},
+            node=ToolNode(id=wid, type="aws_waf", label=label, config=ToolNodeConfig()),
+            boto3_config={"wafv2": configs},
         )
 
 
 class CreateShieldProtectionTool(BaseTool):
     name = "create_shield_protection"
-    description = "Enable AWS Shield Advanced protection for DDoS mitigation on a resource."
+    description = "Enable AWS Shield Advanced protection for a resource."
     category = "security"
     parameters = {
         "type": "object",
         "properties": {
             "shield_id": {"type": "string"}, "label": {"type": "string"},
-            "resource_arn": {"type": "string", "description": "ARN of the resource to protect."},
         },
-        "required": ["shield_id", "label", "resource_arn"],
+        "required": ["shield_id", "label"],
     }
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         sid = params["shield_id"]
-        tf_code = f'''resource "aws_shield_protection" "{sid}" {{
-  name         = "${{var.project_name}}-{sid}"
-  resource_arn = "{params['resource_arn']}"
-  tags = {{ Name = "${{var.project_name}}-{sid}" }}
-}}
-'''
+        label = params.get("label", sid)
+        configs = [{
+            "service": "shield",
+            "action": "create_subscription",
+            "params": {},
+            "label": label,
+            "resource_type": "aws_shield",
+            "is_lookup": True,
+        }]
         return ToolResult(
-            node=ToolNode(id=sid, type="aws_shield", label=params.get("label", sid), config=ToolNodeConfig()),
-            terraform_code={"security.tf": tf_code},
+            node=ToolNode(id=sid, type="aws_shield", label=label, config=ToolNodeConfig()),
+            boto3_config={"shield": configs},
         )
 
 
 class CreateACMCertificateTool(BaseTool):
     name = "create_acm_certificate"
-    description = "Request an AWS ACM SSL/TLS certificate for a domain."
+    description = "Request an AWS ACM SSL/TLS certificate."
     category = "security"
     parameters = {
         "type": "object",
         "properties": {
             "cert_id": {"type": "string"}, "label": {"type": "string"},
-            "domain_name": {"type": "string", "description": "Primary domain (e.g., 'example.com')."},
+            "domain_name": {"type": "string", "description": "Primary domain name."},
             "validation_method": {"type": "string", "default": "DNS"},
         },
         "required": ["cert_id", "label", "domain_name"],
@@ -222,22 +194,32 @@ class CreateACMCertificateTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         cid = params["cert_id"]
-        tf_code = f'''resource "aws_acm_certificate" "{cid}" {{
-  domain_name       = "{params['domain_name']}"
-  validation_method = "{params.get('validation_method', 'DNS')}"
-  tags = {{ Name = "${{var.project_name}}-{cid}" }}
-  lifecycle {{ create_before_destroy = true }}
-}}
-'''
+        label = params.get("label", cid)
+        domain = params["domain_name"]
+        configs = [{
+            "service": "acm",
+            "action": "request_certificate",
+            "params": {
+                "DomainName": domain,
+                "ValidationMethod": params.get("validation_method", "DNS"),
+                "Tags": [{"Key": "Name", "Value": f"__PROJECT__-{cid}"}],
+            },
+            "label": label,
+            "resource_type": "aws_acm_certificate",
+            "resource_id_path": "CertificateArn",
+            "delete_action": "delete_certificate",
+            "delete_params_key": "CertificateArn",
+        }]
         return ToolResult(
-            node=ToolNode(id=cid, type="aws_acm", label=params.get("label", cid), config=ToolNodeConfig()),
-            terraform_code={"security.tf": tf_code},
+            node=ToolNode(id=cid, type="aws_acm", label=label,
+                          config=ToolNodeConfig(extra={"domain": domain})),
+            boto3_config={"acm": configs},
         )
 
 
 class CreateGuardDutyDetectorTool(BaseTool):
     name = "create_guardduty_detector"
-    description = "Enable Amazon GuardDuty for intelligent threat detection."
+    description = "Enable Amazon GuardDuty for threat detection."
     category = "security"
     parameters = {
         "type": "object",
@@ -249,12 +231,18 @@ class CreateGuardDutyDetectorTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         gid = params["gd_id"]
-        tf_code = f'''resource "aws_guardduty_detector" "{gid}" {{
-  enable = true
-  tags = {{ Name = "${{var.project_name}}-{gid}" }}
-}}
-'''
+        label = params.get("label", gid)
+        configs = [{
+            "service": "guardduty",
+            "action": "create_detector",
+            "params": {"Enable": True, "Tags": {"Name": f"__PROJECT__-{gid}"}},
+            "label": label,
+            "resource_type": "aws_guardduty",
+            "resource_id_path": "DetectorId",
+            "delete_action": "delete_detector",
+            "delete_params_key": "DetectorId",
+        }]
         return ToolResult(
-            node=ToolNode(id=gid, type="aws_guardduty", label=params.get("label", gid), config=ToolNodeConfig()),
-            terraform_code={"security.tf": tf_code},
+            node=ToolNode(id=gid, type="aws_guardduty", label=label, config=ToolNodeConfig()),
+            boto3_config={"guardduty": configs},
         )

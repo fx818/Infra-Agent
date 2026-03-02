@@ -1,4 +1,4 @@
-"""Create Subnet tool."""
+"""Create Subnet tool — provisions via boto3."""
 from typing import Any
 from app.tools.base import BaseTool, ToolResult, ToolNode, ToolNodeConfig
 
@@ -22,20 +22,29 @@ class CreateSubnetTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolResult:
         sid = params["subnet_id"]
-        vpc = params["vpc_id"]
+        label = params.get("label", sid)
         cidr = params["cidr_block"]
         public = params.get("is_public", False)
-        tf_code = f'''resource "aws_subnet" "{sid}" {{
-  vpc_id                  = aws_vpc.{vpc}.id
-  cidr_block              = "{cidr}"
-  availability_zone       = data.aws_availability_zones.available.names[{params.get('az_index', 0)}]
-  map_public_ip_on_launch = {str(public).lower()}
-  tags = {{ Name = "${{var.project_name}}-{sid}" }}
-}}
-'''
+        az_idx = params.get("az_index", 0)
+        configs = [{
+            "service": "ec2",
+            "action": "create_subnet",
+            "params": {
+                "VpcId": f"__RESOLVE_REF__:{params['vpc_id']}",
+                "CidrBlock": cidr,
+                "AvailabilityZone": f"__REGION__{'abcdef'[az_idx]}",
+                "MapPublicIpOnLaunch": public,
+                "TagSpecifications": [{"ResourceType": "subnet", "Tags": [{"Key": "Name", "Value": f"__PROJECT__-{sid}"}]}],
+            },
+            "label": label,
+            "resource_type": "aws_subnet",
+            "resource_id_path": "Subnet.SubnetId",
+            "delete_action": "delete_subnet",
+            "delete_params_key": "SubnetId",
+        }]
         return ToolResult(
-            node=ToolNode(id=sid, type="aws_subnet", label=params.get("label", sid),
+            node=ToolNode(id=sid, type="aws_subnet", label=label,
                           config=ToolNodeConfig(extra={"cidr_block": cidr, "is_public": public})),
-            terraform_code={"networking.tf": tf_code},
-            edges=[{"from": vpc, "to": sid, "label": "contains"}],
+            boto3_config={"ec2": configs},
+            edges=[{"from": params["vpc_id"], "to": sid, "label": "contains"}],
         )

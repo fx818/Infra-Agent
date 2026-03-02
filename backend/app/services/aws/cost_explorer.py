@@ -4,6 +4,7 @@ AWS Cost Explorer service — queries real AWS cost data via Boto3.
 Falls back to LLM-generated estimates if AWS credentials are unavailable.
 """
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Any
@@ -80,7 +81,7 @@ class CostExplorerService:
                     }
                 }
 
-            response = client.get_cost_and_usage(**params)
+            response = await asyncio.to_thread(client.get_cost_and_usage, **params)
 
             data_points: list[CostDataPoint] = []
             group_totals: dict[str, float] = {}
@@ -123,7 +124,8 @@ class CostExplorerService:
             return self._fallback_forecast(start_date, end_date)
 
         try:
-            response = client.get_cost_forecast(
+            response = await asyncio.to_thread(
+                client.get_cost_forecast,
                 TimePeriod={"Start": start_date, "End": end_date},
                 Metric="UNBLENDED_COST",
                 Granularity=granularity,
@@ -160,7 +162,8 @@ class CostExplorerService:
 
         try:
             # Right-sizing recommendations
-            response = client.get_rightsizing_recommendation(
+            response = await asyncio.to_thread(
+                client.get_rightsizing_recommendation,
                 Service="AmazonEC2",
                 Configuration={
                     "RecommendationTarget": "SAME_INSTANCE_FAMILY",
