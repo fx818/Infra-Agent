@@ -197,7 +197,8 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
 
         try {
             const token = localStorage.getItem('token');
-            const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/projects/${projectId}/deploy/stream`, {
+            const response = await fetch(`${import.meta.env.VITE_API_URL || 'https://3.92.236.1'}/projects/${projectId}/deploy/stream`, {
+            // const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/projects/${projectId}/deploy/stream`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
