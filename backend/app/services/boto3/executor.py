@@ -14,6 +14,8 @@ from typing import Any, AsyncIterator, Callable
 import boto3
 from botocore.exceptions import ClientError, BotoCoreError
 
+import re
+
 logger = logging.getLogger(__name__)
 
 
@@ -486,6 +488,34 @@ class Boto3Executor:
             )
             if isinstance(result, dict) and result.get("params") is not None:
                 return {**cfg, "params": result["params"]}
+        except ValueError as _ve:
+            # llm.generate() raised ValueError when it couldn't parse the response as
+            # JSON. The raw LLM text is in the exception message — try to extract
+            # {"params": ...} from it directly using brace matching.
+            raw = str(_ve)
+            # Find the start of the params key
+            marker = raw.find('"params"')
+            if marker == -1:
+                marker = raw.find("'params'")
+            if marker != -1:
+                # Walk back to the enclosing '{'
+                obj_start = raw.rfind('{', 0, marker)
+                if obj_start != -1:
+                    depth = 0
+                    for _i in range(obj_start, len(raw)):
+                        if raw[_i] == '{':
+                            depth += 1
+                        elif raw[_i] == '}':
+                            depth -= 1
+                            if depth == 0:
+                                try:
+                                    _extracted = json.loads(raw[obj_start:_i + 1])
+                                    if isinstance(_extracted, dict) and _extracted.get("params") is not None:
+                                        return {**cfg, "params": _extracted["params"]}
+                                except json.JSONDecodeError:
+                                    pass
+                                break
+            _log(f"  LLM repair call error: {_ve}\n")
         except Exception as _e:
             _log(f"  LLM repair call error: {_e}\n")
         return None
@@ -582,6 +612,66 @@ class Boto3Executor:
                     params["ServiceName"] = self._sanitize_apprunner_name(params["ServiceName"])
                     cfg["params"] = params
 
+
+            # Sanitize DynamoDB table names - [a-zA-Z0-9_.-]+
+            if cfg.get("service") == "dynamodb" and cfg.get("action") == "create_table":
+                params = cfg.get("params", {})
+                if "TableName" in params:
+                    _tn = params["TableName"].replace(" ", "-")
+                    _tn = re.sub(r"[^a-zA-Z0-9_\-.]", "-", _tn)
+                    _tn = re.sub(r"-+", "-", _tn).strip("-") or "table"
+                    params["TableName"] = _tn[:255]
+                    for _sk in ("delete_params", "waiter_params"):
+                        if cfg.get(_sk, {}).get("TableName"):
+                            cfg[_sk]["TableName"] = params["TableName"]
+                    cfg["params"] = params
+
+            # Sanitize RDS identifiers - [a-zA-Z][a-zA-Z0-9-]*, max 63 chars
+            if cfg.get("service") == "rds" and cfg.get("action") in (
+                "create_db_instance", "create_db_cluster"
+            ):
+                params = cfg.get("params", {})
+                for _id_key in ("DBInstanceIdentifier", "DBClusterIdentifier"):
+                    if _id_key in params:
+                        _di = re.sub(r"[^a-zA-Z0-9\-]", "-", params[_id_key])
+                        _di = re.sub(r"-+", "-", _di).strip("-") or "db"
+                        _di = _di[:63]
+                        if _di and not _di[0].isalpha():
+                            _di = "db-" + _di
+                        params[_id_key] = _di
+                        for _sub in ("delete_params", "waiter_params"):
+                            if cfg.get(_sub, {}).get(_id_key):
+                                cfg[_sub][_id_key] = _di
+                cfg["params"] = params
+
+            # Sanitize ElastiCache cluster IDs - [a-z][a-z0-9-]*, max 50 chars
+            if cfg.get("service") == "elasticache" and cfg.get("action") == "create_cache_cluster":
+                params = cfg.get("params", {})
+                if "CacheClusterId" in params:
+                    _cc = re.sub(r"[^a-z0-9\-]", "-", params["CacheClusterId"].lower())
+                    _cc = re.sub(r"-+", "-", _cc).strip("-") or "cache"
+                    _cc = _cc[:50]
+                    if _cc and not _cc[0].isalpha():
+                        _cc = "c-" + _cc
+                    params["CacheClusterId"] = _cc
+                    # Propagate sanitized ID to ALL dependent param dicts
+                    for _sk in ("delete_params", "waiter_params"):
+                        if cfg.get(_sk, {}).get("CacheClusterId"):
+                            cfg[_sk]["CacheClusterId"] = _cc
+                    cfg["params"] = params
+
+            # Sanitize ECS cluster/service names - [a-zA-Z0-9_-]+
+            if cfg.get("service") == "ecs":
+                params = cfg.get("params", {})
+                for _nk in ("clusterName", "serviceName"):
+                    if _nk in params:
+                        _cn = re.sub(r"[^a-zA-Z0-9_\-]", "-", params[_nk])
+                        _cn = re.sub(r"-+", "-", _cn).strip("-") or "cluster"
+                        params[_nk] = _cn[:255]
+                        if cfg.get("delete_params", {}).get(_nk):
+                            cfg["delete_params"][_nk] = params[_nk]
+                cfg["params"] = params
+
             # Sanitize CloudFormation stack names â€” [a-zA-Z][-a-zA-Z0-9]* (no underscores)
             if cfg.get("service") == "cloudformation" and cfg.get("action") == "create_stack":
                 params = cfg.get("params", {})
@@ -663,6 +753,48 @@ class Boto3Executor:
                     })
                     continue
 
+            # ── EC2: always create a fresh key pair so the user always has the PEM ──
+            if cfg.get("service") == "ec2" and cfg.get("action") == "run_instances":
+                import re as _re_kp
+                params = cfg.get("params", {})
+                # Use LLM-supplied KeyName if present, otherwise auto-generate one
+                _existing_kn = params.get("KeyName", "").strip()
+                _base = _existing_kn or f"{project_name or 'infra'}-{cfg.get('label', 'instance')}"
+                _kp_name = _re_kp.sub(r"[^a-zA-Z0-9\-_]", "-", _base)[:200].strip("-")
+                if not _kp_name.endswith("-key"):
+                    _kp_name += "-key"
+                _ec2_kp = self._get_client("ec2")
+
+                async def _create_kp_fresh(name: str) -> dict:
+                    """Create key pair, deleting first if it already exists."""
+                    try:
+                        return await asyncio.to_thread(
+                            _ec2_kp.create_key_pair,
+                            KeyName=name, KeyType="rsa", KeyFormat="pem",
+                        )
+                    except ClientError as _ce:
+                        if _ce.response["Error"]["Code"] == "InvalidKeyPair.Duplicate":
+                            _log(f"  \u21bb Key pair '{name}' exists — replacing to obtain fresh PEM...\n")
+                            # Delete existing key and recreate to get the key material
+                            await asyncio.to_thread(_ec2_kp.delete_key_pair, KeyName=name)
+                            return await asyncio.to_thread(
+                                _ec2_kp.create_key_pair,
+                                KeyName=name, KeyType="rsa", KeyFormat="pem",
+                            )
+                        raise
+
+                _log(f"  \U0001f511 Creating EC2 key pair '{_kp_name}'...\n")
+                try:
+                    _kp_resp = await _create_kp_fresh(_kp_name)
+                    cfg["_key_pair_name"] = _kp_name
+                    cfg["_key_pair_id"] = _kp_resp.get("KeyPairId", "")
+                    cfg["_key_material"] = _kp_resp.get("KeyMaterial", "")
+                    params["KeyName"] = _kp_name
+                    cfg["params"] = params
+                    _log(f"  \u2713 Key pair ready: {_kp_name} (ID: {cfg['_key_pair_id']})\n")
+                except Exception as _kp_err:
+                    _log(f"  \u26a0 Could not create key pair: {_kp_err} — instance will launch without a key\n")
+
             service = cfg.get("service", "unknown")
             action = cfg.get("action", "unknown")
             label = cfg.get("label", f"{service}.{action}")
@@ -719,6 +851,17 @@ class Boto3Executor:
                 deployed.append(record)
                 _log(f"  âœ“ Created {label} (ID: {resource_id or 'N/A'})\n")
 
+                # EC2: store key pair fields now; SSH instructions logged AFTER waiter (real IP needed)
+                if service == "ec2" and action == "run_instances" and cfg.get("_key_pair_name"):
+                    record["key_pair_name"] = cfg["_key_pair_name"]
+                    record["key_pair_id"] = cfg.get("_key_pair_id", "")
+                    record["key_material"] = cfg.get("_key_material", "")  # PEM (empty if key pre-existed)
+                    _inst_list = (result or {}).get("Instances", [{}])
+                    _inst = _inst_list[0] if _inst_list else {}
+                    # IP is usually empty here; will be refreshed after instance_running waiter
+                    record["public_ip"] = _inst.get("PublicIpAddress", "")
+                    record["public_dns"] = _inst.get("PublicDnsName", "")
+
                 # Update last_resource_id for __RESOLVE_PREV__ in subsequent configs
                 if resource_id:
                     last_resource_id = resource_id
@@ -745,10 +888,47 @@ class Boto3Executor:
                 if cfg.get("waiter"):
                     _log(f"  â³ Waiting for {label} to be ready...\n")
                     try:
-                        await self._wait_for(service, cfg["waiter"], cfg.get("waiter_params", {}))
+                        await self._wait_for_with_progress(
+                            service, cfg["waiter"], cfg.get("waiter_params", {}), label, _log
+                        )
                         _log(f"  âœ“ {label} is ready.\n")
                     except Exception as we:
                         _log(f"  âš  Waiter warning: {we}\n")
+
+                # EC2: ensure instance is running before describing, so public IP is available
+                if service == "ec2" and action == "run_instances" and resource_id and record.get("key_pair_name"):
+                    # If no waiter was configured, explicitly wait for instance_running now
+                    if not cfg.get("waiter"):
+                        _log(f"  ⏳ Waiting for EC2 instance {resource_id} to reach running state...\n")
+                        try:
+                            await self._wait_for("ec2", "instance_running", {"InstanceIds": [resource_id]})
+                            _log(f"  ✓ Instance {resource_id} is running.\n")
+                        except Exception as _we:
+                            _log(f"  ⚠ Waiter warning: {_we}\n")
+                    # Now describe to get the real public IP/DNS
+                    try:
+                        _ec2_desc = self._get_client("ec2")
+                        _desc_r = await asyncio.to_thread(
+                            _ec2_desc.describe_instances, InstanceIds=[resource_id]
+                        )
+                        _rdesc = _desc_r["Reservations"][0]["Instances"][0]
+                        record["public_ip"] = _rdesc.get("PublicIpAddress", "") or record.get("public_ip", "")
+                        record["public_dns"] = _rdesc.get("PublicDnsName", "") or record.get("public_dns", "")
+                    except Exception as _di_err:
+                        _log(f"  ⚠ Could not refresh instance details: {_di_err}\n")
+                    _kp = record["key_pair_name"]
+                    _kf = f"{_kp}.pem"
+                    _pub_ip = record.get("public_ip", "")
+                    _pub_dns = record.get("public_dns", "")
+                    _host = _pub_dns or _pub_ip or "<check AWS Console for public IP>"
+                    _log(f"\n  🔑 Key pair  : {_kp}\n")
+                    _log(f"  🌍 Public IP : {_pub_ip or '(not yet assigned — check EC2 Console)'}\n")
+                    if _pub_dns:
+                        _log(f"  🌐 Public DNS: {_pub_dns}\n")
+                    if record.get("key_material"):
+                        _log(f"  📥 Download PEM from Deploy tab, then:  chmod 400 {_kf}\n")
+                    _log(f"  📡 SSH (Amazon Linux) : ssh -i \"{_kf}\" ec2-user@{_host}\n")
+                    _log(f"  📡 SSH (Ubuntu)       : ssh -i \"{_kf}\" ubuntu@{_host}\n\n")
 
             except ClientError as e:
                 error_code = e.response["Error"]["Code"]
@@ -958,7 +1138,7 @@ class Boto3Executor:
     async def _wait_for(
         self, service: str, waiter_name: str, params: dict
     ) -> None:
-        """Wait for a resource using a boto3 waiter."""
+        """Wait for a resource using a boto3 waiter (no progress logging)."""
         client = self._get_client(service)
         waiter = client.get_waiter(waiter_name)
         await asyncio.to_thread(
@@ -966,6 +1146,45 @@ class Boto3Executor:
             **params,
             WaiterConfig={"Delay": 10, "MaxAttempts": 60},
         )
+
+    async def _wait_for_with_progress(
+        self,
+        service: str,
+        waiter_name: str,
+        params: dict,
+        label: str,
+        _log: Callable,
+        delay: int = 10,
+        max_attempts: int = 60,
+        progress_interval: int = 30,
+    ) -> None:
+        """
+        Wait for a resource with periodic progress log messages.
+
+        Runs the boto3 waiter in a thread while the async loop fires a
+        '⏳ Still waiting...' log line every `progress_interval` seconds
+        so the user never sees a silent hang on slow resources (e.g.
+        ElastiCache Redis, RDS, EKS which can take 5-10 minutes).
+        """
+        client = self._get_client(service)
+        waiter = client.get_waiter(waiter_name)
+
+        # Wrap synchronous waiter.wait in a future so we can race it with a progress ticker
+        loop = asyncio.get_event_loop()
+        waiter_future = loop.run_in_executor(
+            None,
+            lambda: waiter.wait(**params, WaiterConfig={"Delay": delay, "MaxAttempts": max_attempts}),
+        )
+
+        elapsed = 0
+        while True:
+            done, _ = await asyncio.wait({waiter_future}, timeout=progress_interval)
+            if done:
+                # Re-raise any exception from the waiter
+                waiter_future.result()
+                return
+            elapsed += progress_interval
+            _log(f"  ⏳ Still waiting for {label}... ({elapsed}s elapsed)\n")
 
     async def _pre_delete_cleanup(
         self,

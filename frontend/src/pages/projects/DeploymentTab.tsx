@@ -18,8 +18,12 @@ import {
     ChevronRight,
     Shield,
     Wrench,
-    Timer
+    Timer,
+    Key,
+    Download,
+    Server
 } from 'lucide-react';
+import type { EC2KeyInfo } from '../../api/deployment';
 
 interface Props {
     projectId: number;
@@ -151,11 +155,14 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
     const [copied, setCopied] = useState(false);
     const [elapsedSeconds, setElapsedSeconds] = useState(0);
     const [liveLogs, setLiveLogs] = useState('');   // live-streamed log content (cleared after stream ends)
+    const [ec2Keys, setEc2Keys] = useState<EC2KeyInfo[]>([]);
+    const [copiedSsh, setCopiedSsh] = useState<string | null>(null);
     const logEndRef = useRef<HTMLDivElement>(null);
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     useEffect(() => {
         fetchStatus();
+        fetchEC2Keys();
     }, [projectId]);
 
     // Auto-scroll to bottom when logs update during deployment
@@ -193,6 +200,44 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
         } finally {
             setLoading(false);
         }
+    };
+
+    const fetchEC2Keys = async () => {
+        try {
+            const data = await deploymentApi.getEC2Keys(projectId);
+            setEc2Keys(data.keys || []);
+        } catch {
+            // No EC2 keys found — silently ignore
+        }
+    };
+
+    const handleDownloadPem = async (keyPairName: string) => {
+        try {
+            const token = localStorage.getItem('token');
+            const base = (import.meta.env.VITE_API_URL as string | undefined) || 'http://localhost:8000';
+            const resp = await fetch(`${base}/projects/${projectId}/ec2-key/${keyPairName}/download`, {
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            if (!resp.ok) return;
+            const blob = await resp.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${keyPairName}.pem`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        } catch (err) {
+            console.error('PEM download failed:', err);
+        }
+    };
+
+    const handleCopySsh = (cmd: string) => {
+        navigator.clipboard.writeText(cmd).then(() => {
+            setCopiedSsh(cmd);
+            setTimeout(() => setCopiedSsh(null), 2000);
+        });
     };
 
     const handleDeploy = async () => {
@@ -261,6 +306,7 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
 
             // Stream finished - refresh full status to get final state/timestamps
             await fetchStatus();
+            await fetchEC2Keys();
             setLiveLogs('');  // switch display to persisted status.logs
             await onStatusChange?.();
 
@@ -545,6 +591,113 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
                     )}
                 </div>
             </div>
+
+            {/* EC2 Connection Info — shown whenever EC2 instances with key pairs are deployed */}
+            {ec2Keys.length > 0 && (
+                <div className="glass-card p-5 animate-fade-in">
+                    <div className="flex items-center gap-2 mb-4">
+                        <Server size={15} className="text-blue-400" />
+                        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/70">
+                            EC2 Connection Info
+                        </h3>
+                        <span className="ml-auto text-[10px] text-muted-foreground/40 font-mono">
+                            {ec2Keys.length} instance{ec2Keys.length !== 1 ? 's' : ''}
+                        </span>
+                    </div>
+                    <div className="space-y-3">
+                        {ec2Keys.map((k) => {
+                            const host = k.public_dns || k.public_ip || '<public-ip-once-running>';
+                            const sshAmzn = `ssh -i "${k.key_pair_name}.pem" ec2-user@${host}`;
+                            const sshUbuntu = `ssh -i "${k.key_pair_name}.pem" ubuntu@${host}`;
+                            return (
+                                <div key={k.key_pair_name} className="p-4 rounded-xl bg-[#0d1117] border border-border/30 space-y-3">
+                                    {/* Header row: key name + instance ID + download button */}
+                                    <div className="flex items-center justify-between flex-wrap gap-2">
+                                        <div className="flex items-center gap-2">
+                                            <Key size={13} className="text-yellow-400" />
+                                            <span className="text-xs font-semibold text-white/80 font-mono">{k.key_pair_name}</span>
+                                            {k.instance_id && (
+                                                <span className="text-[10px] text-white/30 font-mono">({k.instance_id})</span>
+                                            )}
+                                        </div>
+                                        {k.has_pem ? (
+                                            <button
+                                                onClick={() => handleDownloadPem(k.key_pair_name)}
+                                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/25 text-emerald-400 text-[11px] font-semibold hover:bg-emerald-500/20 transition-all"
+                                                title="Download PEM private key"
+                                            >
+                                                <Download size={12} />
+                                                Download .pem
+                                            </button>
+                                        ) : (
+                                            <span className="text-[10px] text-amber-400/60 italic">PEM unavailable — AWS key creation may have failed</span>
+                                        )}
+                                    </div>
+
+                                    {/* Public IP — prominent dedicated row */}
+                                    <div className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-blue-500/5 border border-blue-500/15">
+                                        <span className="text-[10px] text-white/40 font-medium uppercase tracking-wide w-20 shrink-0">Public IP</span>
+                                        {k.public_ip ? (
+                                            <div className="flex items-center gap-2 flex-1">
+                                                <span className="font-mono text-sm font-bold text-blue-300">{k.public_ip}</span>
+                                                <button
+                                                    onClick={() => { navigator.clipboard.writeText(k.public_ip); setCopiedSsh(k.public_ip); setTimeout(() => setCopiedSsh(null), 2000); }}
+                                                    className="p-1 rounded text-white/30 hover:text-white/70 transition-colors"
+                                                    title="Copy IP"
+                                                >
+                                                    {copiedSsh === k.public_ip ? <Check size={11} className="text-emerald-400" /> : <Copy size={11} />}
+                                                </button>
+                                            </div>
+                                        ) : (
+                                            <span className="text-[11px] text-amber-400/70 italic flex items-center gap-1.5">
+                                                Pending — check{' '}
+                                                <a
+                                                    href="https://console.aws.amazon.com/ec2/home#Instances"
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="text-blue-400 hover:underline"
+                                                >
+                                                    AWS EC2 Console
+                                                </a>
+                                                {' '}once instance is running
+                                            </span>
+                                        )}
+                                        {k.public_dns && (
+                                            <span className="text-[10px] text-white/25 font-mono truncate max-w-[260px]" title={k.public_dns}>{k.public_dns}</span>
+                                        )}
+                                    </div>
+
+                                    {/* SSH commands */}
+                                    <div className="space-y-2">
+                                        {[{ label: 'Amazon Linux / AL2', cmd: sshAmzn }, { label: 'Ubuntu', cmd: sshUbuntu }].map(({ label, cmd }) => (
+                                            <div key={label} className="group flex items-center gap-2">
+                                                <span className="text-[10px] text-white/30 w-28 shrink-0">{label}</span>
+                                                <code className="flex-1 text-[11px] font-mono text-cyan-300/80 bg-white/5 px-3 py-1.5 rounded-lg border border-white/5 truncate">
+                                                    {cmd}
+                                                </code>
+                                                <button
+                                                    onClick={() => handleCopySsh(cmd)}
+                                                    className="shrink-0 p-1.5 rounded text-white/30 hover:text-white/70 transition-colors"
+                                                    title="Copy SSH command"
+                                                >
+                                                    {copiedSsh === cmd ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    {/* chmod reminder */}
+                                    {k.has_pem && (
+                                        <p className="text-[10px] text-amber-400/60 flex items-center gap-1.5">
+                                            <span className="font-bold">!</span>
+                                            Run <code className="font-mono bg-white/5 px-1 rounded">chmod 400 {k.key_pair_name}.pem</code> before connecting
+                                        </p>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

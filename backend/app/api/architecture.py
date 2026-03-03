@@ -27,6 +27,7 @@ from app.schemas.chat import ChatMessageResponse
 from app.schemas.project import ProjectEditRequest, ProjectGenerateRequest
 from app.services.ai.cost_agent import CostAgent
 from app.services.ai.edit_agent import EditAgent
+from app.services.ai.prompt_enrichment_agent import PromptEnrichmentAgent
 from app.services.ai.tool_agent import ToolAgent
 from app.services.ai.visual_agent import VisualAgent
 from app.services.ai.base import BaseLLMProvider
@@ -93,7 +94,7 @@ async def generate_architecture(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
     """
-    Full generation pipeline: NL → Tool Agent (architecture + boto3 configs) → Cost → Visual.
+    Full generation pipeline: NL → Prompt Enrichment → Tool Agent (architecture + boto3 configs) → Cost → Visual.
     """
     project = await _get_user_project(project_id, db, current_user)
 
@@ -106,10 +107,26 @@ async def generate_architecture(
         # Configure LLM for this user
         llm = _get_llm_provider_for_user(current_user)
 
-        # 1. Tool Agent — uses LLM tool-calling to build architecture + boto3 configs
+        # 1. Prompt Enrichment Agent — rewrites vague prompt into a detailed,
+        #    AWS-service-explicit specification before the ToolAgent sees it.
+        enrichment_agent = PromptEnrichmentAgent(llm=llm)
+        enrichment = await enrichment_agent.run(
+            user_prompt=payload.natural_language_input,
+            region=project.region,
+        )
+        enriched_prompt = enrichment["enriched_prompt"]
+        logger.info(
+            "PromptEnrichment: pattern=%s complexity=%s services=%s",
+            enrichment["architecture_pattern"],
+            enrichment["complexity"],
+            ", ".join(enrichment["services"][:8]),
+        )
+
+        # 2. Tool Agent — uses LLM tool-calling to build architecture + boto3 configs
+        #    Uses enriched_prompt so the LLM has explicit service names and data-flow.
         tool_agent = ToolAgent(llm=llm)
         agent_result = await tool_agent.run(
-            user_prompt=payload.natural_language_input,
+            user_prompt=enriched_prompt,
             region=project.region,
             project_name=project.name,
         )
@@ -129,8 +146,8 @@ async def generate_architecture(
 
         # 4. Build a lightweight intent for backwards compat with the DB schema
         intent = IntentOutput(
-            app_type="tool_generated",
-            scale="medium",
+            app_type=enrichment.get("architecture_pattern", "tool_generated"),
+            scale=enrichment.get("complexity", "medium"),
             latency_requirement="moderate",
             storage_type="object",
             realtime=False,
@@ -173,14 +190,26 @@ async def generate_architecture(
             content=payload.natural_language_input,
             architecture_version=new_version,
         )
+        # Compose assistant reply — include enrichment context
+        detected_services = enrichment.get("services", [])
+        services_str = ", ".join(detected_services) if detected_services else "various AWS services"
+        pattern_str = enrichment.get("architecture_pattern", "")
+        summary_text = agent_result.get("summary", "")
+        assistant_content = (
+            f"Generated architecture v{new_version} with {len(graph.nodes)} AWS services "
+            f"using {agent_result.get('tool_calls_count', 0)} tool calls.\n\n"
+        )
+        if pattern_str:
+            assistant_content += f"**Pattern:** {pattern_str}\n"
+        if detected_services:
+            assistant_content += f"**Services identified:** {services_str}\n"
+        if summary_text:
+            assistant_content += f"\n{summary_text}"
+
         assistant_msg = ChatMessage(
             project_id=project_id,
             role="assistant",
-            content=(
-                f"Generated architecture v{new_version} with {len(graph.nodes)} AWS services "
-                f"using {agent_result.get('tool_calls_count', 0)} tool calls.\n\n"
-                f"{agent_result.get('summary', '')}"
-            ),
+            content=assistant_content.strip(),
             architecture_version=new_version,
         )
         db.add_all([user_msg, assistant_msg])
@@ -273,42 +302,63 @@ async def edit_architecture(
         if errors:
             logger.warning("Modified architecture validation warnings: %s", errors)
 
-        # 3. Regenerate boto3 configs via ToolAgent using the modified graph
-        #    Build an explicit per-service prompt so the LLM reliably calls one tool per node
-        service_lines = "\n".join(
-            f"- {node.type} node '{node.id}' labelled '{node.label}'"
-            for node in modified_graph.nodes
-        )
-        regen_prompt = (
-            f"Provision the following AWS infrastructure by calling the appropriate tool for "
-            f"EACH service listed. Do not skip any. Call one tool per service, then call "
-            f"`connect_services` for each edge in the graph.\n\n"
-            f"Services to create:\n{service_lines}\n\n"
-            f"Edges (connections):\n"
-            + "\n".join(
-                f"- {e.source} → {e.target} ({e.label})"
-                for e in modified_graph.edges
+        # 3. Regenerate boto3 configs
+        #    For drag-build projects: use the deterministic _generate_boto3_config function
+        #    (same as the save/update endpoints) — this guarantees all nodes get proper configs.
+        #    For AI-generated projects: use ToolAgent (LLM-based tool calls).
+        if project.source == "drag_built":
+            from app.api.drag_build import CanvasNode, _generate_boto3_config
+            canvas_nodes = [
+                CanvasNode(
+                    id=node.id,
+                    type=node.type,
+                    label=node.label,
+                    position={"x": 0, "y": 0},
+                    config=node.config.model_dump() if hasattr(node.config, "model_dump") else (node.config or {}),
+                )
+                for node in modified_graph.nodes
+            ]
+            boto3_configs = _generate_boto3_config(canvas_nodes, project.region)
+            logger.info(
+                "drag_built project %d: regenerated boto3 config for %d nodes via _generate_boto3_config",
+                project_id, len(canvas_nodes),
             )
-        )
-        tool_agent = ToolAgent(llm=llm)
-        regen_result = await tool_agent.run(
-            user_prompt=regen_prompt,
-            region=project.region,
-            project_name=project.name,
-        )
-        boto3_configs = regen_result["boto3_configs"]
+        else:
+            # AI-generated project: use ToolAgent
+            service_lines = "\n".join(
+                f"- {node.type} node '{node.id}' labelled '{node.label}'"
+                for node in modified_graph.nodes
+            )
+            regen_prompt = (
+                f"Provision the following AWS infrastructure by calling the appropriate tool for "
+                f"EACH service listed. Do not skip any. Call one tool per service, then call "
+                f"`connect_services` for each edge in the graph.\n\n"
+                f"Services to create:\n{service_lines}\n\n"
+                f"Edges (connections):\n"
+                + "\n".join(
+                    f"- {e.source} → {e.target} ({e.label})"
+                    for e in modified_graph.edges
+                )
+            )
+            tool_agent = ToolAgent(llm=llm)
+            regen_result = await tool_agent.run(
+                user_prompt=regen_prompt,
+                region=project.region,
+                project_name=project.name,
+            )
+            boto3_configs = regen_result["boto3_configs"]
 
-        # Fallback: if the LLM returned no tool calls (empty configs), keep the previous
-        # architecture's boto3 configs so deployment doesn't silently break.
-        if not boto3_configs:
-            prev_files = _parse_json(latest.terraform_files_json)
-            if isinstance(prev_files, dict):
-                boto3_configs = prev_files.get("files", prev_files)
-            logger.warning(
-                "ToolAgent returned empty boto3_configs during edit of project %d — "
-                "falling back to previous architecture's configs.",
-                project_id,
-            )
+            # Fallback: if the LLM returned no tool calls (empty configs), keep the previous
+            # architecture's boto3 configs so deployment doesn't silently break.
+            if not boto3_configs:
+                prev_files = _parse_json(latest.terraform_files_json)
+                if isinstance(prev_files, dict):
+                    boto3_configs = prev_files.get("files", prev_files)
+                logger.warning(
+                    "ToolAgent returned empty boto3_configs during edit of project %d — "
+                    "falling back to previous architecture's configs.",
+                    project_id,
+                )
 
         # 4. Sanitize boto3 config
         is_safe, issues = sanitize_boto3_config(boto3_configs)

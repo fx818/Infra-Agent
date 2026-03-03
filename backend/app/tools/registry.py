@@ -105,13 +105,14 @@ class ToolRegistry:
     def get_relevant_openai_tools(
         self,
         user_prompt: str,
-        max_tools: int = 20,
+        max_tools: int = 60,
     ) -> list[dict[str, Any]]:
         """Return a filtered set of tools most relevant to the user prompt.
 
         Uses keyword matching to identify relevant categories, then returns
         up to `max_tools` tools. Always includes connect_services and
-        core tools (compute, networking, storage).
+        core tools (compute, networking, storage). If only default categories
+        are matched (i.e. broad/ambiguous prompt), all categories are included.
         """
         prompt_lower = user_prompt.lower()
 
@@ -181,11 +182,22 @@ class ToolRegistry:
         }
 
         # Always include these categories (core infra)
-        matched_categories: set[str] = {"compute", "networking"}
+        _DEFAULT_CATEGORIES: set[str] = {"compute", "networking"}
+        matched_categories: set[str] = set(_DEFAULT_CATEGORIES)
 
         for keyword, categories in _KEYWORD_TO_CATEGORIES.items():
             if keyword in prompt_lower:
                 matched_categories.update(categories)
+
+        # If only the default categories matched (broad/vague prompt like
+        # "Netflix architecture" or "cloud app"), include ALL categories so
+        # the LLM has the full service palette available.
+        if matched_categories == _DEFAULT_CATEGORIES:
+            matched_categories = set(self.get_categories())
+            logger.info(
+                "ToolRegistry: no specific keywords matched — using all %d categories",
+                len(matched_categories),
+            )
 
         # Collect tools from matched categories
         selected: list[BaseTool] = []

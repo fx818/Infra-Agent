@@ -21,6 +21,8 @@ export const AWS_CATEGORIES = [
     'Monitoring',
     'DevOps',
     'Analytics',
+    'AI/ML',
+    'Application',
 ] as const;
 
 export type AwsCategory = typeof AWS_CATEGORIES[number];
@@ -35,6 +37,8 @@ export const CATEGORY_COLORS: Record<string, string> = {
     Monitoring: '#E7157B',
     DevOps: '#FF9900',
     Analytics: '#527FFF',
+    'AI/ML': '#00A4A6',
+    Application: '#C7131F',
 };
 
 export const AWS_SERVICE_CATALOG: AwsServiceDef[] = [
@@ -243,6 +247,281 @@ export const AWS_SERVICE_CATALOG: AwsServiceDef[] = [
         category: 'Analytics',
         description: 'Data warehouse service',
         defaultConfig: { node_type: 'dc2.large' },
+    },
+    {
+        id: 'aws_glue',
+        name: 'Glue',
+        category: 'Analytics',
+        description: 'ETL and data catalog service',
+        defaultConfig: {},
+    },
+    {
+        id: 'aws_athena',
+        name: 'Athena',
+        category: 'Analytics',
+        description: 'Serverless SQL queries on S3',
+        defaultConfig: {},
+    },
+    {
+        id: 'aws_emr',
+        name: 'EMR',
+        category: 'Analytics',
+        description: 'Big data processing (Spark/Hadoop)',
+        defaultConfig: { instance_type: 'm5.xlarge' },
+    },
+    {
+        id: 'aws_opensearch',
+        name: 'OpenSearch',
+        category: 'Analytics',
+        description: 'Search and analytics engine',
+        defaultConfig: { instance_type: 't3.medium.search' },
+    },
+    {
+        id: 'aws_msk',
+        name: 'MSK (Kafka)',
+        category: 'Analytics',
+        description: 'Managed Apache Kafka service',
+        defaultConfig: { instance_type: 'kafka.t3.small' },
+    },
+
+    // ── Additional Compute ──────────────────────────────────────────
+    {
+        id: 'aws_app_runner',
+        name: 'App Runner',
+        category: 'Compute',
+        description: 'Deploy containerized web apps automatically',
+        defaultConfig: { cpu: '1 vCPU', memory: '2 GB' },
+    },
+    {
+        id: 'aws_step_functions',
+        name: 'Step Functions',
+        category: 'Compute',
+        description: 'Serverless workflow orchestration',
+        defaultConfig: { type: 'STANDARD' },
+    },
+    {
+        id: 'aws_batch',
+        name: 'Batch',
+        category: 'Compute',
+        description: 'Managed batch computing jobs',
+        defaultConfig: { compute_type: 'MANAGED' },
+    },
+    {
+        id: 'aws_elastic_beanstalk',
+        name: 'Elastic Beanstalk',
+        category: 'Compute',
+        description: 'PaaS application deployment platform',
+        defaultConfig: { platform: 'Python 3.12' },
+    },
+    {
+        id: 'aws_lightsail',
+        name: 'Lightsail',
+        category: 'Compute',
+        description: 'Simple VMs with predictable pricing',
+        defaultConfig: { bundle_id: 'nano_3_0' },
+    },
+
+    // ── Additional Storage ──────────────────────────────────────────
+    {
+        id: 'aws_efs',
+        name: 'EFS',
+        category: 'Storage',
+        description: 'Elastic shared file system (NFS)',
+        defaultConfig: { throughput_mode: 'bursting' },
+    },
+    {
+        id: 'aws_fsx',
+        name: 'FSx',
+        category: 'Storage',
+        description: 'High-performance managed file systems',
+        defaultConfig: { file_system_type: 'LUSTRE' },
+    },
+    {
+        id: 'aws_glacier',
+        name: 'S3 Glacier',
+        category: 'Storage',
+        description: 'Low-cost long-term archival storage',
+        defaultConfig: { tier: 'BULK' },
+    },
+
+    // ── Additional Database ─────────────────────────────────────────
+    {
+        id: 'aws_neptune',
+        name: 'Neptune',
+        category: 'Database',
+        description: 'Managed graph database',
+        defaultConfig: { instance_type: 'db.t3.medium' },
+    },
+    {
+        id: 'aws_documentdb',
+        name: 'DocumentDB',
+        category: 'Database',
+        description: 'MongoDB-compatible document database',
+        defaultConfig: { instance_type: 'db.t3.medium' },
+    },
+    {
+        id: 'aws_timestream',
+        name: 'Timestream',
+        category: 'Database',
+        description: 'Serverless time-series database',
+        defaultConfig: {},
+    },
+    {
+        id: 'aws_keyspaces',
+        name: 'Keyspaces',
+        category: 'Database',
+        description: 'Managed Apache Cassandra service',
+        defaultConfig: {},
+    },
+
+    // ── Additional Networking ───────────────────────────────────────
+    {
+        id: 'aws_security_group',
+        name: 'Security Group',
+        category: 'Networking',
+        description: 'Virtual firewall for EC2/RDS/ECS',
+        defaultConfig: {},
+    },
+    {
+        id: 'aws_global_accelerator',
+        name: 'Global Accelerator',
+        category: 'Networking',
+        description: 'Improve global application availability',
+        defaultConfig: {},
+    },
+    {
+        id: 'aws_vpn_gateway',
+        name: 'VPN Gateway',
+        category: 'Networking',
+        description: 'Site-to-site VPN connectivity',
+        defaultConfig: {},
+    },
+    {
+        id: 'aws_apigatewayv2',
+        name: 'API Gateway v2',
+        category: 'Networking',
+        description: 'HTTP/WebSocket API (v2)',
+        defaultConfig: { protocol_type: 'HTTP' },
+    },
+
+    // ── Additional Security ─────────────────────────────────────────
+    {
+        id: 'aws_kms',
+        name: 'KMS',
+        category: 'Security',
+        description: 'Key management and encryption',
+        defaultConfig: {},
+    },
+    {
+        id: 'aws_waf',
+        name: 'WAF',
+        category: 'Security',
+        description: 'Web application firewall',
+        defaultConfig: {},
+    },
+    {
+        id: 'aws_guardduty',
+        name: 'GuardDuty',
+        category: 'Security',
+        description: 'Intelligent threat detection service',
+        defaultConfig: {},
+    },
+    {
+        id: 'aws_acm',
+        name: 'Certificate Manager',
+        category: 'Security',
+        description: 'SSL/TLS certificate provisioning',
+        defaultConfig: {},
+    },
+
+    // ── Additional DevOps ───────────────────────────────────────────
+    {
+        id: 'aws_codepipeline',
+        name: 'CodePipeline',
+        category: 'DevOps',
+        description: 'CI/CD pipeline automation',
+        defaultConfig: {},
+    },
+    {
+        id: 'aws_codebuild',
+        name: 'CodeBuild',
+        category: 'DevOps',
+        description: 'Managed build service',
+        defaultConfig: { compute_type: 'BUILD_GENERAL1_SMALL' },
+    },
+    {
+        id: 'aws_cloudformation',
+        name: 'CloudFormation',
+        category: 'DevOps',
+        description: 'Infrastructure as code stacks',
+        defaultConfig: {},
+    },
+    {
+        id: 'aws_amplify',
+        name: 'Amplify',
+        category: 'DevOps',
+        description: 'Full-stack web/mobile app hosting',
+        defaultConfig: {},
+    },
+
+    // ── AI/ML ────────────────────────────────────────────────────────
+    {
+        id: 'aws_sagemaker',
+        name: 'SageMaker',
+        category: 'AI/ML',
+        description: 'Build, train and deploy ML models',
+        defaultConfig: { instance_type: 'ml.t3.medium' },
+    },
+    {
+        id: 'aws_bedrock',
+        name: 'Bedrock',
+        category: 'AI/ML',
+        description: 'Foundation models as a managed service',
+        defaultConfig: {},
+    },
+    {
+        id: 'aws_rekognition',
+        name: 'Rekognition',
+        category: 'AI/ML',
+        description: 'Image and video analysis with AI',
+        defaultConfig: {},
+    },
+    {
+        id: 'aws_comprehend',
+        name: 'Comprehend',
+        category: 'AI/ML',
+        description: 'Natural language processing (NLP)',
+        defaultConfig: {},
+    },
+
+    // ── Application ──────────────────────────────────────────────────
+    {
+        id: 'aws_appsync',
+        name: 'AppSync',
+        category: 'Application',
+        description: 'Managed GraphQL API service',
+        defaultConfig: {},
+    },
+    {
+        id: 'aws_ses',
+        name: 'SES',
+        category: 'Application',
+        description: 'Email sending and receiving service',
+        defaultConfig: {},
+    },
+    {
+        id: 'aws_pinpoint',
+        name: 'Pinpoint',
+        category: 'Application',
+        description: 'Customer engagement and marketing',
+        defaultConfig: {},
+    },
+    {
+        id: 'aws_iot_core',
+        name: 'IoT Core',
+        category: 'Application',
+        description: 'Connect and manage IoT devices',
+        defaultConfig: {},
     },
 ];
 

@@ -4,6 +4,7 @@ Now generates boto3 config instead of Terraform HCL.
 """
 
 import json
+import re
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -197,6 +198,23 @@ async def update_drag_build(
 
 # ── Boto3 config generator ───────────────────────────────────────────
 
+def _sanitize_name(value: str, allow_dots: bool = False) -> str:
+    """Strip characters not valid in most AWS resource names (alphanumeric + hyphen).
+
+    AWS services differ slightly, but a conservative safe set is [a-zA-Z0-9-].
+    Parentheses, underscores used as separators, spaces, and other punctuation are
+    all removed or replaced so that generated names never hit naming-constraint errors.
+    """
+    # Replace spaces and underscores with hyphens
+    value = value.strip().lower().replace(" ", "-").replace("_", "-")
+    # Strip everything except alphanumeric, hyphen, and optionally dot
+    allowed = r"[^a-z0-9\-.]" if allow_dots else r"[^a-z0-9\-]"
+    value = re.sub(allowed, "", value)
+    # Collapse consecutive hyphens and trim leading/trailing hyphens
+    value = re.sub(r"-+", "-", value).strip("-")
+    return value or "resource"
+
+
 def _generate_boto3_config(nodes: list[CanvasNode], region: str) -> dict:
     """
     Generate boto3 API call configs from canvas nodes.
@@ -208,8 +226,11 @@ def _generate_boto3_config(nodes: list[CanvasNode], region: str) -> dict:
         configs.setdefault(service, []).append(op)
 
     for node in nodes:
-        rid = node.id.replace("-", "_")
-        rname = node.label.lower().replace(" ", "-").replace("_", "-")
+        # Sanitize identifiers: rid for internal use (alphanumeric + _)
+        # rname for AWS resource names (alphanumeric + -)
+        rid = re.sub(r"[^a-z0-9_]", "_", node.id.lower().replace("-", "_"))
+        rid = re.sub(r"_+", "_", rid).strip("_") or "resource"
+        rname = _sanitize_name(node.label)
         svc = node.type.replace("aws_", "").lower()
 
         if svc == "ec2":

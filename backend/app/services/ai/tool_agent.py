@@ -24,6 +24,101 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_PATH = Path(__file__).resolve().parent.parent.parent / "prompts" / "tool_agent_prompt.md"
 
+# ── Auto-edge inference rules ─────────────────────────────────────────────────
+# Defines which service types naturally connect to which, with a default label.
+# Used when the LLM doesn't call connect_services at all (0 edges produced).
+_AUTO_EDGE_RULES: list[tuple[str, str, str]] = [
+    # Entry points → Compute
+    ("aws_route53",       "aws_cloudfront",    "routes to"),
+    ("aws_route53",       "aws_elb",           "routes to"),
+    ("aws_route53",       "aws_api_gateway",   "routes to"),
+    ("aws_route53",       "aws_apigatewayv2",  "routes to"),
+    ("aws_route53",       "aws_ec2",           "routes to"),
+    ("aws_cloudfront",    "aws_s3",            "serves from"),
+    ("aws_cloudfront",    "aws_elb",           "forwards to"),
+    ("aws_cloudfront",    "aws_api_gateway",   "forwards to"),
+    ("aws_cloudfront",    "aws_apigatewayv2",  "forwards to"),
+    ("aws_elb",           "aws_ec2",           "routes to"),
+    ("aws_elb",           "aws_ecs",           "routes to"),
+    ("aws_elb",           "aws_eks",           "routes to"),
+    ("aws_api_gateway",   "aws_lambda",        "invokes"),
+    ("aws_api_gateway",   "aws_ecs",           "routes to"),
+    ("aws_api_gateway",   "aws_ec2",           "routes to"),
+    ("aws_apigatewayv2",  "aws_lambda",        "invokes"),
+    ("aws_apigatewayv2",  "aws_ecs",           "routes to"),
+    # Compute → Storage
+    ("aws_ec2",           "aws_s3",            "reads/writes"),
+    ("aws_ec2",           "aws_ebs",           "mounts"),
+    ("aws_ec2",           "aws_efs",           "mounts"),
+    ("aws_lambda",        "aws_s3",            "reads/writes"),
+    ("aws_ecs",           "aws_s3",            "reads/writes"),
+    ("aws_ecs",           "aws_efs",           "mounts"),
+    ("aws_eks",           "aws_s3",            "reads/writes"),
+    # Compute → Database
+    ("aws_ec2",           "aws_rds",           "reads/writes"),
+    ("aws_ec2",           "aws_aurora",        "reads/writes"),
+    ("aws_ec2",           "aws_dynamodb",      "reads/writes"),
+    ("aws_ec2",           "aws_elasticache",   "caches via"),
+    ("aws_lambda",        "aws_dynamodb",      "reads/writes"),
+    ("aws_lambda",        "aws_rds",           "reads/writes"),
+    ("aws_lambda",        "aws_aurora",        "reads/writes"),
+    ("aws_lambda",        "aws_elasticache",   "caches via"),
+    ("aws_ecs",           "aws_rds",           "reads/writes"),
+    ("aws_ecs",           "aws_aurora",        "reads/writes"),
+    ("aws_ecs",           "aws_dynamodb",      "reads/writes"),
+    ("aws_ecs",           "aws_elasticache",   "caches via"),
+    ("aws_eks",           "aws_rds",           "reads/writes"),
+    ("aws_eks",           "aws_dynamodb",      "reads/writes"),
+    # Messaging
+    ("aws_lambda",        "aws_sqs",           "publishes to"),
+    ("aws_lambda",        "aws_sns",           "publishes to"),
+    ("aws_lambda",        "aws_kinesis",       "publishes to"),
+    ("aws_ec2",           "aws_sqs",           "publishes to"),
+    ("aws_ec2",           "aws_sns",           "publishes to"),
+    ("aws_ecs",           "aws_sqs",           "publishes to"),
+    ("aws_ecs",           "aws_sns",           "publishes to"),
+    ("aws_sqs",           "aws_lambda",        "triggers"),
+    ("aws_sns",           "aws_lambda",        "triggers"),
+    ("aws_sns",           "aws_sqs",           "fans out to"),
+    ("aws_eventbridge",   "aws_lambda",        "triggers"),
+    ("aws_eventbridge",   "aws_sqs",           "delivers to"),
+    ("aws_eventbridge",   "aws_sns",           "delivers to"),
+    ("aws_kinesis",       "aws_lambda",        "triggers"),
+    ("aws_msk",           "aws_lambda",        "triggers"),
+    # Security
+    ("aws_cognito",       "aws_api_gateway",   "authenticates"),
+    ("aws_cognito",       "aws_apigatewayv2",  "authenticates"),
+    ("aws_waf",           "aws_cloudfront",    "protects"),
+    ("aws_waf",           "aws_api_gateway",   "protects"),
+    ("aws_secrets_manager", "aws_lambda",      "provides secrets"),
+    ("aws_secrets_manager", "aws_ecs",         "provides secrets"),
+    ("aws_secrets_manager", "aws_ec2",         "provides secrets"),
+    ("aws_acm",           "aws_cloudfront",    "provides TLS"),
+    ("aws_acm",           "aws_elb",           "provides TLS"),
+    # DevOps
+    ("aws_ecr",           "aws_ecs",           "provides images"),
+    ("aws_ecr",           "aws_eks",           "provides images"),
+    ("aws_codepipeline",  "aws_codebuild",     "triggers"),
+    ("aws_codebuild",     "aws_ecr",           "pushes to"),
+    ("aws_codepipeline",  "aws_ecs",           "deploys to"),
+    ("aws_codepipeline",  "aws_lambda",        "deploys to"),
+    # Analytics
+    ("aws_kinesis",       "aws_s3",            "stores to"),
+    ("aws_kinesis",       "aws_redshift",      "loads to"),
+    ("aws_glue",          "aws_s3",            "reads/writes"),
+    ("aws_glue",          "aws_redshift",      "loads to"),
+    ("aws_athena",        "aws_s3",            "queries"),
+    ("aws_msk",           "aws_s3",            "stores to"),
+    # Monitoring
+    ("aws_cloudwatch",    "aws_sns",           "alerts via"),
+    ("aws_cloudwatch",    "aws_lambda",        "triggers"),
+]
+
+# Build a lookup: node_type → list of (target_type, label)
+_SOURCE_MAP: dict[str, list[tuple[str, str]]] = {}
+for _src, _tgt, _lbl in _AUTO_EDGE_RULES:
+    _SOURCE_MAP.setdefault(_src, []).append((_tgt, _lbl))
+
 
 class ToolAgent:
     """
@@ -76,13 +171,14 @@ class ToolAgent:
 
         # Build the full user prompt with context
         full_prompt = (
-            f"## User Request\n\n{user_prompt}\n\n"
+            f"## Architecture Specification\n\n{user_prompt}\n\n"
             f"## Configuration\n\n"
             f"- AWS Region: {region}\n"
             f"- Project Name: {safe_name}\n\n"
-            f"Design and provision the complete AWS architecture by calling the appropriate tools. "
-            f"After creating all services, use `connect_services` to define how they interact. "
-            f"When done, provide a summary of the architecture you built."
+            f"**Your task**: Call a tool for EVERY service described in the Architecture Specification above. "
+            f"Do NOT stop until every service has been provisioned via a tool call. "
+            f"Then call `connect_services` for every pair of services that communicate. "
+            f"Only provide a text summary AFTER all services and connections have been created."
         )
 
         # Get relevant tool definitions (filtered by user prompt to reduce tokens)
@@ -161,8 +257,24 @@ class ToolAgent:
             except Exception as e:
                 logger.warning("Failed to create node from %s: %s", n, e)
 
+        # Auto-infer edges when LLM skipped connect_services entirely.
+        # Also supplement sparse edge lists so every obvious connection is shown.
+        inferred = self._infer_edges(nodes)
+        all_raw_edges = list(self._edges)  # LLM-produced edges come first
+        existing_pairs: set[tuple[str, str]] = {
+            (e.get("from", ""), e.get("to", "")) for e in all_raw_edges
+        }
+        for ie in inferred:
+            pair = (ie["from"], ie["to"])
+            if pair not in existing_pairs:
+                all_raw_edges.append(ie)
+                existing_pairs.add(pair)
+
+        if not self._edges and inferred:
+            logger.info("No LLM edges produced — used %d auto-inferred edges", len(inferred))
+
         edges = []
-        for e in self._edges:
+        for e in all_raw_edges:
             try:
                 edges.append(ArchitectureEdge(
                     **{"from": e.get("from", ""), "to": e.get("to", ""), "label": e.get("label", "")}
@@ -171,5 +283,39 @@ class ToolAgent:
                 logger.warning("Failed to create edge from %s: %s", e, ex)
 
         return ArchitectureGraph(nodes=nodes, edges=edges)
+
+    def _infer_edges(self, nodes: list[ArchitectureNode]) -> list[dict[str, Any]]:
+        """
+        Auto-generate edges based on known AWS service relationships.
+
+        Iterates over all node pairs and applies _SOURCE_MAP rules to produce
+        sensible default connections when the LLM didn't call connect_services.
+        """
+        # Build a quick lookup: node_type → list of node_ids that have that type
+        type_to_ids: dict[str, list[str]] = {}
+        for node in nodes:
+            type_to_ids.setdefault(node.type, []).append(node.id)
+
+        inferred: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+
+        for src_type, targets in _SOURCE_MAP.items():
+            src_ids = type_to_ids.get(src_type, [])
+            if not src_ids:
+                continue
+            for tgt_type, label in targets:
+                tgt_ids = type_to_ids.get(tgt_type, [])
+                if not tgt_ids:
+                    continue
+                # Connect each source to the most relevant target (first one)
+                # to avoid fan-out explosion with many same-type nodes.
+                for src_id in src_ids:
+                    tgt_id = tgt_ids[0]
+                    pair = (src_id, tgt_id)
+                    if pair not in seen:
+                        inferred.append({"from": src_id, "to": tgt_id, "label": label})
+                        seen.add(pair)
+
+        return inferred
 
 

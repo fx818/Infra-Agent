@@ -133,48 +133,73 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         try:
             return json.loads(content)
         except json.JSONDecodeError:
-            # Try to extract JSON from markdown code blocks
-            if "```json" in content:
-                json_str = content.split("```json")[1].split("```")[0].strip()
-                try:
-                    return json.loads(json_str)
-                except json.JSONDecodeError:
-                    pass
-            elif "```" in content:
-                json_str = content.split("```")[1].split("```")[0].strip()
-                try:
-                    return json.loads(json_str)
-                except json.JSONDecodeError:
-                    pass
+            pass
 
-            # Fix common LLM quirk: duplicate leading/trailing braces  e.g. "{\n{"
-            import re
-            stripped = content.strip()
-            # Remove duplicate opening braces: "{\n{" -> "{"
-            stripped = re.sub(r'^\{\s*\{', '{', stripped)
-            # Remove duplicate closing braces: "}\n}" -> "}"
-            stripped = re.sub(r'\}\s*\}$', '}', stripped)
+        import re
+
+        # ── Repair pass 1: non-strict (allows control chars in strings) ──────
+        try:
+            return json.loads(content, strict=False)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # ── Repair pass 2: markdown code blocks ──────────────────────────────
+        if "```json" in content:
+            json_str = content.split("```json")[1].split("```")[0].strip()
             try:
-                return json.loads(stripped)
-            except json.JSONDecodeError:
+                return json.loads(json_str, strict=False)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        elif "```" in content:
+            json_str = content.split("```")[1].split("```")[0].strip()
+            try:
+                return json.loads(json_str, strict=False)
+            except (json.JSONDecodeError, ValueError):
                 pass
 
-            # Last resort: find the outermost { ... } using brace matching
-            start = content.find('{')
-            if start != -1:
-                depth = 0
-                for i in range(start, len(content)):
-                    if content[i] == '{':
-                        depth += 1
-                    elif content[i] == '}':
-                        depth -= 1
-                        if depth == 0:
-                            try:
-                                return json.loads(content[start:i + 1])
-                            except json.JSONDecodeError:
-                                break
+        stripped = content.strip()
 
-            raise ValueError(f"LLM response is not valid JSON: {content[:200]}")
+        # ── Repair pass 3: double-outer-brace  e.g.  {\n  "{\n  "nodes": […
+        #    The LLM wraps the real JSON in a string inside a phantom outer {}.
+        #    Detect: starts with { then whitespace then " then { (quoted brace).
+        if re.match(r'^\{\s*"\{', stripped):
+            # Find the second { — that is the start of the real JSON object.
+            second_brace = stripped.index('{', 1)
+            inner = stripped[second_brace:]
+            # The inner may end with  …}"\n} — the closing requires stripping
+            # a trailing  }  or  "}  or  }\n}  that belongs to the phantom wrapper.
+            inner = re.sub(r'"\s*\}\s*$', '', inner).rstrip()
+            if not inner.endswith('}'):
+                inner = inner + '}'
+            try:
+                return json.loads(inner, strict=False)
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # ── Repair pass 4: duplicate leading/trailing braces  e.g.  {\n{ ────
+        fixed = re.sub(r'^\{\s*\{', '{', stripped)
+        fixed = re.sub(r'\}\s*\}$', '}', fixed)
+        try:
+            return json.loads(fixed, strict=False)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # ── Repair pass 5: brace-matching — find the first complete {...} ────
+        start = content.find('{')
+        if start != -1:
+            depth = 0
+            for i in range(start, len(content)):
+                if content[i] == '{':
+                    depth += 1
+                elif content[i] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(content[start:i + 1], strict=False)
+                        except (json.JSONDecodeError, ValueError):
+                            break
+
+        raise ValueError(f"LLM response is not valid JSON: {content[:200]}")
 
     async def generate_with_tools(
         self,
@@ -185,12 +210,14 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         temperature: float = 0.2,
     ) -> dict[str, Any]:
         """
-        Run LLM tool-calling via prompt-based approach.
+        Run LLM tool-calling using the native OpenAI tools API with a
+        prompt-based JSON fallback for models that ignore the tools parameter.
 
-        Instead of relying on native tool-calling API support (which not all
-        models/providers handle correctly), we embed tool definitions in the
-        system prompt and ask the LLM to output tool calls as JSON. We parse
-        and execute them, then feed results back iteratively.
+        Primary path: passes `tools` + `tool_choice="auto"` to the API and
+        reads structured `tool_calls` from the response message.
+        Fallback path: if the API errors or returns no tool_calls, the
+        embedded tool descriptions in the system prompt are used to parse
+        JSON tool calls from the raw text response.
         """
         # Build compact tool descriptions for the prompt
         tool_descriptions = []
@@ -215,14 +242,16 @@ class OpenAICompatibleProvider(BaseLLMProvider):
 
 ## How to Call Tools
 
-To call tools, respond with a JSON array of tool calls:
+To call tools, respond with a JSON array of tool calls. You can call MULTIPLE tools at once:
 
 ```json
-[{{"name": "tool_name", "parameters": {{"param1": "value1"}}}}]
+[{{"name": "tool_name", "parameters": {{"param1": "value1"}}}}, {{"name": "tool_name2", "parameters": {{"param2": "value2"}}}}]
 ```
 
-Call one or more tools per response. After I return results, you may call more tools.
-When you are DONE creating all resources, respond with a plain text summary (no JSON array).
+Call as many tools as needed per response, then I will return results and you may call more.
+Keep calling tools until EVERY service in the architecture spec has been provisioned.
+You are DONE only when all services AND all connections (`connect_services`) have been created.
+Only then respond with a plain text summary (no JSON array) to signal completion.
 """
 
         full_system_prompt = system_prompt + "\n" + tool_calling_instructions
@@ -240,20 +269,83 @@ When you are DONE creating all resources, respond with a plain text summary (no 
                 iteration + 1, self.model, len(messages),
             )
 
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
-            )
+            # ── Attempt 1: native OpenAI tool-calling API ────────────────────
+            native_tool_calls = []
+            content = ""
+            try:
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    tools=tools,
+                    tool_choice="auto",
+                    temperature=temperature,
+                )
+                msg = response.choices[0].message
+                content = msg.content or ""
+                native_tool_calls = msg.tool_calls or []
 
-            content = response.choices[0].message.content or ""
+                if native_tool_calls:
+                    # Append the assistant message (serialised as dict) with its tool_calls
+                    assistant_dict: dict[str, Any] = {"role": "assistant", "content": content}
+                    assistant_dict["tool_calls"] = [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in native_tool_calls
+                    ]
+                    messages.append(assistant_dict)
+
+                    # Execute each native tool call and collect tool messages
+                    for tc in native_tool_calls:
+                        fn_name = tc.function.name
+                        try:
+                            fn_args = json.loads(tc.function.arguments or "{}")
+                        except json.JSONDecodeError:
+                            fn_args = {}
+
+                        logger.info("Executing tool (native): %s(%s)", fn_name, json.dumps(fn_args)[:200])
+                        try:
+                            result_str = await tool_executor(fn_name, fn_args)
+                        except Exception as e:
+                            logger.error("Tool execution failed: %s — %s", fn_name, e)
+                            result_str = json.dumps({"error": str(e)})
+
+                        all_tool_calls.append({"name": fn_name, "arguments": fn_args, "result": result_str})
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": result_str,
+                        })
+
+                    continue  # next iteration
+
+            except Exception as api_err:
+                # Native tool-calling not supported by this endpoint — fall through
+                logger.debug("Native tool-calling API error: %s — trying prompt fallback", api_err)
+                # Re-request without tools= parameter
+                try:
+                    response = await self.client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        temperature=temperature,
+                    )
+                    content = response.choices[0].message.content or ""
+                except Exception as e2:
+                    logger.error("Fallback (no-tools) request also failed: %s", e2)
+                    break
+
             logger.debug("LLM response (iter %d): %s", iteration + 1, content[:500])
 
-            # Try to parse tool calls from the response
+            # ── Attempt 2: prompt-based JSON extraction (fallback) ───────────
             parsed_calls = self._extract_tool_calls(content)
 
             if not parsed_calls:
-                # No tool calls found — this is the final summary
+                # No tool calls found — treat as final summary
                 logger.info(
                     "Tool-calling complete after %d iterations, %d total tool calls",
                     iteration + 1, len(all_tool_calls),
@@ -263,13 +355,13 @@ When you are DONE creating all resources, respond with a plain text summary (no 
                     "tool_calls": all_tool_calls,
                 }
 
-            # Execute each parsed tool call
+            # Execute each prompt-based tool call
             results_text_parts = []
             for call in parsed_calls:
                 fn_name = call.get("name", "")
                 fn_args = call.get("parameters", {})
 
-                logger.info("Executing tool: %s(%s)", fn_name, json.dumps(fn_args)[:200])
+                logger.info("Executing tool (prompt): %s(%s)", fn_name, json.dumps(fn_args)[:200])
 
                 try:
                     result_str = await tool_executor(fn_name, fn_args)

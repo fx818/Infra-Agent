@@ -55,7 +55,7 @@ export const Layout: React.FC = () => {
                         <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
                             <Zap size={18} className="text-white" />
                         </div>
-                        <span className="text-lg font-bold gradient-text">AUGS Infra Agent</span>
+                        <span className="text-lg font-bold gradient-text">Infra Agent</span>
                         <button
                             className="ml-auto md:hidden text-muted-foreground hover:text-foreground transition-colors"
                             onClick={() => setIsMobileMenuOpen(false)}

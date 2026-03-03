@@ -24,5 +24,20 @@ export const deploymentApi = {
     list: async (projectId: string | number) => {
         const response = await api.get<DeploymentResponse[]>(`/projects/${projectId}/deployments`);
         return response.data;
-    }
+    },
+
+    getEC2Keys: async (projectId: string | number): Promise<{ keys: EC2KeyInfo[] }> => {
+        const response = await api.get(`/projects/${projectId}/ec2-keys`);
+        return response.data;
+    },
 };
+
+export interface EC2KeyInfo {
+    instance_id: string;
+    label: string;
+    key_pair_name: string;
+    key_pair_id: string;
+    has_pem: boolean;
+    public_ip: string;
+    public_dns: string;
+}

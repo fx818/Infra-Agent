@@ -221,16 +221,32 @@ async def _load_boto3_config(project_id: int, db: AsyncSession) -> tuple:
     return arch, boto3_configs
 
 
+def _sanitize_project_name(name: str) -> str:
+    """Return a version of the project name safe to embed in any AWS resource name.
+
+    Most AWS services accept only [a-zA-Z0-9-] (or a subset).  Project names
+    entered by users may include spaces, parentheses, underscores, etc., so we
+    strip everything to alphanumeric + hyphen here rather than letting individual
+    service calls fail at the AWS API.
+    """
+    import re as _re
+    name = name.strip().lower().replace(" ", "-").replace("_", "-")
+    name = _re.sub(r"[^a-z0-9\-]", "", name)      # strip anything not alphanumeric/-
+    name = _re.sub(r"-+", "-", name).strip("-")   # collapse runs of hyphens
+    return name[:40] or "project"                  # cap length; never empty
+
+
 def _resolve_config_placeholders(
     configs: list[dict], project_name: str, region: str,
 ) -> list[dict]:
     """Replace __PROJECT__, __REGION__ placeholders in config params."""
     import copy
 
+    safe_project = _sanitize_project_name(project_name)
     resolved = []
     for cfg in configs:
         cfg = copy.deepcopy(cfg)
-        _replace_in_obj(cfg, {"__PROJECT__": project_name, "__REGION__": region})
+        _replace_in_obj(cfg, {"__PROJECT__": safe_project, "__REGION__": region})
         resolved.append(cfg)
     return resolved
 
@@ -885,3 +901,93 @@ async def destroy_multiple_resources(
         "total": len(results), "succeeded": succeeded,
         "failed": len(results) - succeeded, "results": results,
     }
+
+
+# ── EC2 Key Pair helpers ────────────────────────────────────────────
+
+@router.get("/{project_id}/ec2-keys")
+async def list_ec2_keys(
+    project_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """Return EC2 instances that have an associated key pair from the latest deployment."""
+    from app.services.boto3.state_tracker import StateTracker
+
+    await _get_user_project(project_id, db, current_user)
+    state_tracker = StateTracker(db)
+
+    dep_result = await db.execute(
+        select(Deployment)
+        .where(
+            Deployment.project_id == project_id,
+            Deployment.status.in_(["success", "deployed", "partial_deployed"]),
+        )
+        .order_by(Deployment.created_at.desc())
+        .limit(1)
+    )
+    deployment = dep_result.scalar_one_or_none()
+    if not deployment:
+        return {"project_id": project_id, "keys": []}
+
+    resources = state_tracker.get_resources(deployment)
+    keys = []
+    for r in resources:
+        if r.get("service") == "ec2" and r.get("action") == "run_instances" and r.get("key_pair_name"):
+            keys.append({
+                "instance_id": r.get("resource_id", ""),
+                "label": r.get("label", ""),
+                "key_pair_name": r["key_pair_name"],
+                "key_pair_id": r.get("key_pair_id", ""),
+                "has_pem": bool(r.get("key_material")),
+                "public_ip": r.get("public_ip", ""),
+                "public_dns": r.get("public_dns", ""),
+            })
+    return {"project_id": project_id, "keys": keys}
+
+
+@router.get("/{project_id}/ec2-key/{key_pair_name}/download")
+async def download_ec2_key_pem(
+    project_id: int,
+    key_pair_name: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    """Download the PEM file for an EC2 key pair created during deployment."""
+    from app.services.boto3.state_tracker import StateTracker
+    from fastapi.responses import Response
+
+    await _get_user_project(project_id, db, current_user)
+    state_tracker = StateTracker(db)
+
+    dep_result = await db.execute(
+        select(Deployment)
+        .where(
+            Deployment.project_id == project_id,
+            Deployment.status.in_(["success", "deployed", "partial_deployed"]),
+        )
+        .order_by(Deployment.created_at.desc())
+        .limit(1)
+    )
+    deployment = dep_result.scalar_one_or_none()
+    if not deployment:
+        raise HTTPException(status_code=404, detail="No deployment found for this project.")
+
+    resources = state_tracker.get_resources(deployment)
+    for r in resources:
+        if r.get("key_pair_name") == key_pair_name and r.get("key_material"):
+            pem_content = r["key_material"]
+            return Response(
+                content=pem_content.encode("utf-8"),
+                media_type="application/x-pem-file",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{key_pair_name}.pem"',
+                    "Content-Type": "application/x-pem-file",
+                },
+            )
+
+    raise HTTPException(
+        status_code=404,
+        detail=f"PEM key material not found for '{key_pair_name}'. "
+               "Key may have been created before this feature was added, or it already existed.",
+    )
