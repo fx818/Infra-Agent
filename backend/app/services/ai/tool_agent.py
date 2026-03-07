@@ -226,11 +226,14 @@ class ToolAgent:
             for edge in result.edges:
                 self._edges.append(edge)
 
-            # Merge boto3 configs
+            # Merge boto3 configs — tag each op with the originating tool node ID
+            # so the executor can build a cross-reference map.
             for service, ops in result.boto3_config.items():
                 if service not in self._boto3_configs:
                     self._boto3_configs[service] = []
-                self._boto3_configs[service].extend(ops)
+                for op in (ops if isinstance(ops, list) else [ops]):
+                    op["_tool_node_id"] = result.node.id
+                self._boto3_configs[service].extend(ops if isinstance(ops, list) else [ops])
 
             return json.dumps({
                 "status": "success",

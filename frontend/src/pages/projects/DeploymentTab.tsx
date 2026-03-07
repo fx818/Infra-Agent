@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { flushSync } from 'react-dom';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { flushSync, createPortal } from 'react-dom';
 import { deploymentApi } from '../../api/deployment';
 import type { DeploymentResponse } from '../../types';
 import {
@@ -21,7 +21,10 @@ import {
     Timer,
     Key,
     Download,
-    Server
+    Server,
+    RotateCcw,
+    Maximize2,
+    Minimize2
 } from 'lucide-react';
 import type { EC2KeyInfo } from '../../api/deployment';
 
@@ -38,9 +41,9 @@ function detectPhase(logs: string): DeployPhase {
     if (!logs) return 'idle';
     const lower = logs.toLowerCase();
     if (lower.includes('[error] command failed') || lower.includes('deployment failed') || lower.includes('boto3 deployment failed') || lower.includes('boto3 destroy failed')) return 'failed';
-    if (lower.includes('deployment successful') || lower.includes('provisioning complete') || lower.includes('boto3 deployment finished: success') || lower.includes('destruction complete')) return 'complete';
-    if (lower.includes('starting aws resource provisioning') || lower.includes('starting boto3 deployment')) return 'apply';
-    if (lower.includes('starting aws resource destruction') || lower.includes('starting boto3 destroy')) return 'destroy';
+    if (lower.includes('deployment successful') || lower.includes('provisioning complete') || lower.includes('boto3 deployment finished: success') || lower.includes('destruction complete') || lower.includes('phase 2/2 complete:')) return 'complete';
+    if (lower.includes('starting aws resource provisioning') || lower.includes('starting boto3 deployment') || lower.includes('phase 2/2: starting fresh')) return 'apply';
+    if (lower.includes('starting aws resource destruction') || lower.includes('starting boto3 destroy') || lower.includes('phase 1/2: destroying')) return 'destroy';
     if (lower.includes('validating infrastructure configuration')) return 'plan';
     if (lower.includes('initializing')) return 'init';
     return 'idle';
@@ -151,6 +154,10 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
     const [loading, setLoading] = useState(true);
     const [deploying, setDeploying] = useState(false);
     const [destroying, setDestroying] = useState(false);
+    const [redeploying, setRedeploying] = useState(false);
+    const [showRedeployConfirm, setShowRedeployConfirm] = useState(false);
+    const [isLogsFullScreen, setIsLogsFullScreen] = useState(false);
+    const toggleLogsFullScreen = useCallback(() => setIsLogsFullScreen(v => !v), []);
     const [error, setError] = useState('');
     const [copied, setCopied] = useState(false);
     const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -165,16 +172,26 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
         fetchEC2Keys();
     }, [projectId]);
 
+    // Escape key exits fullscreen log view
+    useEffect(() => {
+        const handler = (e: KeyboardEvent) => {
+            if (e.key === 'Escape' && isLogsFullScreen) setIsLogsFullScreen(false);
+        };
+        window.addEventListener('keydown', handler);
+        return () => window.removeEventListener('keydown', handler);
+    }, [isLogsFullScreen]);
+
     // Auto-scroll to bottom when logs update during deployment
     useEffect(() => {
-        if (deploying && logEndRef.current) {
+        if ((deploying || redeploying) && logEndRef.current) {
             logEndRef.current.scrollIntoView({ behavior: 'smooth' });
         }
-    }, [liveLogs, status?.logs, deploying]);
+    }, [liveLogs, status?.logs, deploying, redeploying]);
 
     // Timer during deployment
     useEffect(() => {
-        if (deploying) {
+        const active = deploying || redeploying;
+        if (active) {
             setElapsedSeconds(0);
             timerRef.current = setInterval(() => {
                 setElapsedSeconds(prev => prev + 1);
@@ -188,7 +205,7 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
         return () => {
             if (timerRef.current) clearInterval(timerRef.current);
         };
-    }, [deploying]);
+    }, [deploying, redeploying]);
 
     const fetchStatus = async () => {
         try {
@@ -307,15 +324,16 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
             // Stream finished - refresh full status to get final state/timestamps
             await fetchStatus();
             await fetchEC2Keys();
-            setLiveLogs('');  // switch display to persisted status.logs
             await onStatusChange?.();
 
         } catch (err: any) {
             const detail = err.message || 'Deployment failed';
             setError(detail);
-            setLiveLogs('');
             console.error('Deploy error:', err);
         } finally {
+            // Batch liveLogs clear with deploying=false so React renders
+            // status.logs instead of briefly showing the empty-logs placeholder.
+            setLiveLogs('');
             setDeploying(false);
         }
     };
@@ -335,6 +353,78 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
             setDestroying(false);
             await fetchStatus();
             await onStatusChange?.();
+        }
+    };
+
+    const handleRedeploy = async () => {
+        setShowRedeployConfirm(false);
+        setRedeploying(true);
+        setError('');
+        setLiveLogs('');
+        setStatus(prev => prev ? { ...prev, logs: '', status: 'running', error_message: undefined, error_details: undefined } : null);
+
+        try {
+            const token = localStorage.getItem('token');
+            const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/projects/${projectId}/redeploy/stream`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+            });
+
+            if (!response.ok) {
+                const text = await response.text();
+                let detail = 'Redeploy request failed';
+                try {
+                    const errJson = JSON.parse(text);
+                    detail = errJson.detail || text;
+                } catch {
+                    detail = text || detail;
+                }
+                throw new Error(detail);
+            }
+
+            if (!response.body) throw new Error('No response body');
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let sseBuffer = '';
+
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+
+                sseBuffer += decoder.decode(value, { stream: true });
+                const parts = sseBuffer.split('\n\n');
+                sseBuffer = parts.pop() ?? '';
+
+                let newContent = '';
+                for (const part of parts) {
+                    for (const line of part.split('\n')) {
+                        if (line.startsWith('data: ')) {
+                            newContent += line.slice(6) + '\n';
+                        }
+                    }
+                }
+                if (newContent) {
+                    flushSync(() => {
+                        setLiveLogs(prev => prev + newContent);
+                    });
+                }
+            }
+
+            await fetchStatus();
+            await fetchEC2Keys();
+            await onStatusChange?.();
+
+        } catch (err: any) {
+            const detail = err.message || 'Redeploy failed';
+            setError(detail);
+            console.error('Redeploy error:', err);
+        } finally {
+            setLiveLogs('');
+            setRedeploying(false);
         }
     };
 
@@ -380,15 +470,16 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
     }
 
     const statusInfo = getStatusConfig(status?.status || '');
-    const currentPhase = deploying ? detectPhase(status?.logs || '') : 'idle';
+    const isActiveDeployment = deploying || redeploying;
+    const currentPhase = isActiveDeployment ? detectPhase(liveLogs || status?.logs || '') : 'idle';
     const errorSummary = parseErrorSummary(status?.error_details);
 
-    // Phase pipeline indicators
-    const phases: DeployPhase[] = ['init', 'apply', 'complete'];
+    // Phase pipeline indicators — redeploy shows destroy→apply→complete
+    const phases: DeployPhase[] = redeploying ? ['destroy', 'apply', 'complete'] : ['init', 'apply', 'complete'];
     const phaseIndex = phases.indexOf(currentPhase);
 
     return (
-        <div className="h-full flex flex-col gap-4 animate-fade-in">
+        <div className="flex flex-col gap-4 animate-fade-in pb-2">
             {/* Status & Actions */}
             <div className="glass-card p-5">
                 <div className="flex items-center justify-between">
@@ -406,8 +497,8 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
                     </div>
 
                     <div className="flex items-center gap-2">
-                        {/* Elapsed timer during deployment */}
-                        {deploying && (
+                        {/* Elapsed timer during deployment / redeploy */}
+                        {isActiveDeployment && (
                             <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-500/10 border border-blue-500/20 text-blue-400 text-[11px] font-mono font-semibold animate-pulse">
                                 <Timer size={12} />
                                 {formatElapsed(elapsedSeconds)}
@@ -424,7 +515,7 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
 
                         <button
                             onClick={handleDeploy}
-                            disabled={deploying || destroying}
+                            disabled={isActiveDeployment || destroying}
                             className="btn-gradient flex items-center gap-2 text-xs py-2"
                         >
                             {deploying ? (
@@ -440,10 +531,32 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
                             )}
                         </button>
 
+                        {/* Redeploy button — visible whenever a deployment record exists */}
+                        {status && status.status !== 'no_deployments' && (
+                            <button
+                                onClick={() => setShowRedeployConfirm(true)}
+                                disabled={isActiveDeployment || destroying}
+                                className="flex items-center gap-2 text-xs py-2 px-3 rounded-lg bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20 disabled:opacity-50 transition-all font-medium"
+                                title="Destroy existing infrastructure and redeploy from scratch"
+                            >
+                                {redeploying ? (
+                                    <>
+                                        <Loader2 size={13} className="animate-spin" />
+                                        <span>Redeploying…</span>
+                                    </>
+                                ) : (
+                                    <>
+                                        <RotateCcw size={13} />
+                                        <span>Redeploy</span>
+                                    </>
+                                )}
+                            </button>
+                        )}
+
                         {(status?.status === 'deployed' || status?.status === 'success') && (
                             <button
                                 onClick={handleDestroy}
-                                disabled={deploying || destroying}
+                                disabled={isActiveDeployment || destroying}
                                 className="flex items-center gap-2 text-xs py-2 px-3 rounded-lg bg-destructive/10 text-destructive border border-destructive/20 hover:bg-destructive/20 disabled:opacity-50 transition-all font-medium"
                             >
                                 {destroying ? (
@@ -462,8 +575,8 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
                     </div>
                 </div>
 
-                {/* Phase Progress Bar (visible during deployment) */}
-                {deploying && currentPhase !== 'idle' && (
+                {/* Phase Progress Bar (visible during deployment or redeploy) */}
+                {isActiveDeployment && currentPhase !== 'idle' && (
                     <div className="mt-4 flex items-center gap-2 animate-fade-in">
                         {phases.map((phase, i) => {
                             const isActive = currentPhase === phase;
@@ -535,7 +648,7 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
                 )}
 
                 {/* Fallback: simple error from deployment record (when no details available) */}
-                {!errorSummary && status?.error_message && status?.status === 'failed' && !deploying && (
+                {!errorSummary && status?.error_message && status?.status === 'failed' && !isActiveDeployment && (
                     <div className="mt-4 p-3 bg-amber-500/10 text-amber-400 text-xs rounded-lg border border-amber-500/20 flex items-start gap-2 animate-fade-in">
                         <AlertTriangle size={14} className="mt-0.5 shrink-0" />
                         <div className="space-y-1 flex-1">
@@ -554,32 +667,41 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
             </div>
 
             {/* Logs */}
-            <div className="flex-1 flex flex-col glass-card overflow-hidden">
+            <div className="flex flex-col glass-card overflow-hidden" style={{ height: 'clamp(340px, 50vh, 600px)' }}>
                 <div className="p-4 border-b border-border/30 flex items-center justify-between">
                     <div className="flex items-center gap-2">
                         <Terminal size={14} className="text-muted-foreground/50" />
                         <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/60">
                             Deployment Logs
                         </h3>
-                        {deploying && (
+                        {isActiveDeployment && (
                             <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 text-[9px] font-semibold animate-pulse">
                                 <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
                                 LIVE
                             </span>
                         )}
                     </div>
-                    {status?.started_at && (
-                        <span className="text-[10px] text-muted-foreground/30 font-mono">
-                            started: {status.started_at}
-                            {status?.completed_at ? ` • completed: ${status.completed_at}` : ''}
-                        </span>
-                    )}
+                    <div className="flex items-center gap-3">
+                        {status?.started_at && (
+                            <span className="text-[10px] text-muted-foreground/30 font-mono">
+                                started: {status.started_at}
+                                {status?.completed_at ? ` • completed: ${status.completed_at}` : ''}
+                            </span>
+                        )}
+                        <button
+                            onClick={toggleLogsFullScreen}
+                            className="p-1.5 rounded-lg text-muted-foreground/40 hover:text-foreground hover:bg-white/[0.04] transition-all"
+                            title="Full Screen Logs"
+                        >
+                            <Maximize2 size={13} />
+                        </button>
+                    </div>
                 </div>
                 <div className="flex-1 overflow-auto bg-[#0d1117] p-4">
                     {/* During streaming show liveLogs; afterwards show persisted status.logs */}
-                    {(deploying ? liveLogs : status?.logs) ? (
+                    {(isActiveDeployment && liveLogs ? liveLogs : status?.logs) ? (
                         <pre className="text-[11px] leading-[1.8] font-mono whitespace-pre-wrap selection:bg-primary/30">
-                            {(deploying ? liveLogs : status!.logs!).split('\n').map((line, i) => colorizeLogLine(line, i))}
+                            {(isActiveDeployment && liveLogs ? liveLogs : status!.logs!).split('\n').map((line, i) => colorizeLogLine(line, i))}
                             <div ref={logEndRef} />
                         </pre>
                     ) : (
@@ -591,6 +713,83 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
                     )}
                 </div>
             </div>
+
+            {/* Fullscreen log portal */}
+            {isLogsFullScreen && createPortal(
+                <div style={{
+                    position: 'fixed',
+                    inset: 0,
+                    zIndex: 99999,
+                    background: '#0d1117',
+                    display: 'flex',
+                    flexDirection: 'column',
+                }}>
+                    {/* Header */}
+                    <div style={{
+                        padding: '12px 20px',
+                        borderBottom: '1px solid rgba(255,255,255,0.06)',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        background: 'rgba(13,17,23,0.8)',
+                        backdropFilter: 'blur(20px)',
+                        flexShrink: 0,
+                    }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                            <div style={{ padding: '6px', borderRadius: '8px', background: 'rgba(99,102,241,0.12)', display: 'flex' }}>
+                                <Terminal size={16} color="#6366f1" />
+                            </div>
+                            <div>
+                                <h2 style={{ fontSize: '13px', fontWeight: 700, color: '#f1f5f9', margin: 0 }}>Deployment Logs</h2>
+                                <p style={{ fontSize: '11px', color: 'rgba(255,255,255,0.3)', margin: 0 }}>
+                                    {isActiveDeployment ? 'Streaming live…' : (status?.completed_at ? `Completed: ${status.completed_at}` : 'Full Screen View')}
+                                </p>
+                            </div>
+                            {isActiveDeployment && (
+                                <span style={{
+                                    display: 'flex', alignItems: 'center', gap: '5px',
+                                    padding: '2px 8px', borderRadius: '999px',
+                                    background: 'rgba(59,130,246,0.12)',
+                                    border: '1px solid rgba(59,130,246,0.25)',
+                                    color: '#60a5fa', fontSize: '9px', fontWeight: 700,
+                                }}>
+                                    <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#60a5fa', display: 'inline-block', animation: 'pulse 1s infinite' }} />
+                                    LIVE
+                                </span>
+                            )}
+                        </div>
+                        <button
+                            onClick={toggleLogsFullScreen}
+                            style={{
+                                display: 'flex', alignItems: 'center', gap: '6px',
+                                padding: '6px 14px', borderRadius: '8px',
+                                background: 'rgba(255,255,255,0.05)',
+                                border: '1px solid rgba(255,255,255,0.1)',
+                                color: 'rgba(255,255,255,0.7)',
+                                fontSize: '12px', fontWeight: 600, cursor: 'pointer',
+                            }}
+                        >
+                            <Minimize2 size={13} />
+                            <span>Exit Full Screen</span>
+                        </button>
+                    </div>
+                    {/* Log content */}
+                    <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px', fontFamily: 'monospace' }}>
+                        {(isActiveDeployment && liveLogs ? liveLogs : status?.logs) ? (
+                            <pre style={{ fontSize: '12px', lineHeight: 1.9, whiteSpace: 'pre-wrap', margin: 0 }}>
+                                {(isActiveDeployment && liveLogs ? liveLogs : status!.logs!).split('\n').map((line, i) => colorizeLogLine(line, i))}
+                                <div ref={logEndRef} />
+                            </pre>
+                        ) : (
+                            <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '12px', color: 'rgba(255,255,255,0.12)' }}>
+                                <Terminal size={40} />
+                                <p style={{ fontSize: '13px', margin: 0 }}>No deployment logs yet</p>
+                            </div>
+                        )}
+                    </div>
+                </div>,
+                document.body
+            )}
 
             {/* EC2 Connection Info — shown whenever EC2 instances with key pairs are deployed */}
             {ec2Keys.length > 0 && (
@@ -697,6 +896,55 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
                         })}
                     </div>
                 </div>
+            )}
+
+            {/* ── Redeploy Confirmation Dialog ─────────────────────────── */}
+            {showRedeployConfirm && createPortal(
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
+                    <div className="glass-card w-full max-w-md p-6 space-y-4 border border-amber-500/30 shadow-2xl">
+                        <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center shrink-0">
+                                <RotateCcw size={20} className="text-amber-400" />
+                            </div>
+                            <div>
+                                <h3 className="text-sm font-bold text-white">Redeploy Infrastructure?</h3>
+                                <p className="text-[11px] text-muted-foreground/60 mt-0.5">This action cannot be undone</p>
+                            </div>
+                        </div>
+
+                        <div className="p-3 rounded-xl bg-amber-500/5 border border-amber-500/20 space-y-2">
+                            <p className="text-[12px] text-amber-300/90 font-medium flex items-center gap-2">
+                                <AlertTriangle size={13} />
+                                What will happen:
+                            </p>
+                            <ol className="list-decimal list-inside space-y-1 text-[11px] text-white/60 pl-1">
+                                <li>All existing AWS resources will be <span className="text-red-400 font-semibold">permanently destroyed</span></li>
+                                <li>Fresh infrastructure will be provisioned from the current architecture</li>
+                            </ol>
+                        </div>
+
+                        <p className="text-[11px] text-white/40">
+                            Only proceed if you intend to replace all existing cloud resources for this project.
+                        </p>
+
+                        <div className="flex items-center gap-2 pt-1">
+                            <button
+                                onClick={() => setShowRedeployConfirm(false)}
+                                className="flex-1 py-2 px-4 rounded-lg text-xs font-medium bg-white/5 text-white/60 hover:bg-white/10 border border-white/10 transition-all"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={handleRedeploy}
+                                className="flex-1 py-2 px-4 rounded-lg text-xs font-bold bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 border border-amber-500/30 transition-all flex items-center justify-center gap-2"
+                            >
+                                <RotateCcw size={13} />
+                                Delete & Redeploy
+                            </button>
+                        </div>
+                    </div>
+                </div>,
+                document.body
             )}
         </div>
     );

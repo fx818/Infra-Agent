@@ -175,7 +175,7 @@ export const CostAnalysis: React.FC = () => {
     const [error, setError] = useState<string | null>(null);
 
     // Date range state
-    const [activePreset, setActivePreset] = useState('Last 3 Months');
+    const [activePreset, setActivePreset] = useState('Last 12 Months');
     const [startDate, setStartDate] = useState('');
     const [endDate, setEndDate] = useState('');
     const [granularity, setGranularity] = useState<'DAILY' | 'MONTHLY'>('MONTHLY');
@@ -186,7 +186,7 @@ export const CostAnalysis: React.FC = () => {
 
     // Initialize with default preset
     useEffect(() => {
-        const preset = DATE_PRESETS.find(p => p.label === 'Last 3 Months');
+        const preset = DATE_PRESETS.find(p => p.label === 'Last 12 Months');
         if (preset) {
             const range = preset.getRange();
             setStartDate(range.start);

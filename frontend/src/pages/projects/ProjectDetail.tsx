@@ -147,7 +147,7 @@ export const ProjectDetail: React.FC = () => {
             </div>
 
             {/* Content */}
-            <div className="flex-1 overflow-hidden">
+            <div className="flex-1 overflow-y-auto">
                 {activeTab === 'architecture' && <ArchitectureTab projectId={project.id} />}
                 {activeTab === 'deployment' && <DeploymentTab projectId={project.id} onStatusChange={fetchProject} />}
                 {activeTab === 'monitoring' && <MonitoringTab projectId={project.id} />}

@@ -194,12 +194,26 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                 elif content[i] == '}':
                     depth -= 1
                     if depth == 0:
+                        candidate = content[start:i + 1]
                         try:
-                            return json.loads(content[start:i + 1], strict=False)
+                            return json.loads(candidate, strict=False)
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+                        # Try removing trailing commas before } or ]
+                        cleaned = re.sub(r',\s*([}\]])', r'\1', candidate)
+                        try:
+                            return json.loads(cleaned, strict=False)
                         except (json.JSONDecodeError, ValueError):
                             break
 
-        raise ValueError(f"LLM response is not valid JSON: {content[:200]}")
+        # ── Repair pass 6: strip trailing commas globally and retry ───────────
+        cleaned = re.sub(r',\s*([}\]])', r'\1', stripped)
+        try:
+            return json.loads(cleaned, strict=False)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        raise ValueError(f"LLM response is not valid JSON: {content}")
 
     async def generate_with_tools(
         self,

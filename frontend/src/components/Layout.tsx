@@ -7,7 +7,7 @@ import {
     Settings,
     LogOut,
     Server,
-    Activity,
+    // Activity,
     Menu,
     X,
     Zap,
@@ -35,7 +35,7 @@ export const Layout: React.FC = () => {
         { label: 'AWS Explorer', path: '/aws-explorer', icon: Globe },
         { label: 'Deployments', path: '/deployments', icon: Server },
         { label: 'Cost Analysis', path: '/cost-analysis', icon: DollarSign },
-        { label: 'Monitoring', path: '/monitoring', icon: Activity },
+        // { label: 'Monitoring', path: '/monitoring', icon: Activity },
         { label: 'Logs', path: '/logs', icon: ScrollText },
         { label: 'Settings', path: '/settings', icon: Settings },
     ];

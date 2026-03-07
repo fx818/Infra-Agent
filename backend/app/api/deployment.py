@@ -621,6 +621,185 @@ async def deploy_project_stream(
     )
 
 
+@router.post("/{project_id}/redeploy/stream")
+async def redeploy_project_stream(
+    project_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    """Redeploy (SSE): destroy existing resources first, then provision fresh from current architecture."""
+    project = await _get_user_project(project_id, db, current_user)
+
+    try:
+        arch, boto3_configs = await _load_boto3_config(project_id, db)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load config: {e}")
+
+    # Find any previous deployment that has saved resource state
+    prev_dep_result = await db.execute(
+        select(Deployment)
+        .where(
+            Deployment.project_id == project_id,
+            Deployment.status.in_(["success", "deployed", "partial_deployed"]),
+        )
+        .order_by(Deployment.created_at.desc())
+        .limit(1)
+    )
+    prev_deployment = prev_dep_result.scalar_one_or_none()
+
+    deployment = Deployment(
+        project_id=project_id,
+        architecture_version=arch.version,
+        action="redeploy",
+        status="running",
+        started_at=datetime.now(timezone.utc),
+    )
+    # Copy resource state from previous deployment so the destroy phase can find it
+    if prev_deployment and prev_deployment.resource_state_json:
+        deployment.resource_state_json = prev_deployment.resource_state_json
+
+    db.add(deployment)
+    await db.execute(
+        update(Project).where(Project.id == project_id).values(status="deploying")
+    )
+    await db.commit()
+    await db.refresh(deployment)
+
+    async def _stream():
+        from app.services.boto3.executor import Boto3Executor
+        from app.services.boto3.state_tracker import StateTracker
+
+        aws_creds = _get_aws_credentials(current_user)
+        region = aws_creds.get("region") or project.region or "us-east-1"
+        safe_name = project.name.lower().replace(" ", "-").replace("_", "-")
+        safe_name = "".join(c for c in safe_name if c.isalnum() or c == "-")
+
+        executor = Boto3Executor(
+            aws_access_key_id=aws_creds.get("aws_access_key_id"),
+            aws_secret_access_key=aws_creds.get("aws_secret_access_key"),
+            region_name=region,
+            project_name=safe_name,
+        )
+        state_tracker = StateTracker(db)
+        combined_logs = ""
+
+        # Build per-user LLM provider for in-loop repair
+        _deploy_llm = None
+        try:
+            from app.services.ai.base import OpenAICompatibleProvider
+            from app.core.security import decrypt_credentials as _dc_llm
+            _llm_prefs = current_user.llm_preferences or {}
+            if current_user.llm_api_key_encrypted:
+                _deploy_llm = OpenAICompatibleProvider(
+                    api_key=_dc_llm(current_user.llm_api_key_encrypted),
+                    base_url=_llm_prefs.get("base_url"),
+                    model=_llm_prefs.get("model"),
+                )
+        except Exception:
+            pass
+
+        flat_configs = Boto3Executor.flatten_configs(boto3_configs)
+        flat_configs = _resolve_config_placeholders(flat_configs, safe_name, region)
+
+        log_queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+        def log_cb(line: str):
+            nonlocal combined_logs
+            combined_logs += line + "\n"
+            log_queue.put_nowait(line + "\n")
+
+        async def _run_redeploy():
+            nonlocal combined_logs
+            new_project_status = "failed"
+            try:
+                # ── Phase 1: Destroy existing resources ──────────────────────────
+                resource_records = state_tracker.get_resources(deployment)
+                if resource_records:
+                    log_cb("=== Phase 1/2: Destroying existing AWS resources ===")
+                    results = await executor.destroy(resource_records, log_cb)
+                    failed_count = sum(1 for r in results if r.get("destroy_status") == "failed")
+                    if failed_count:
+                        log_cb(f"=== WARNING: {failed_count} resource(s) failed to destroy — proceeding anyway ===")
+                    state_tracker.clear_resources(deployment)
+                    # Also clear the previous deployment's resource state
+                    if prev_deployment and prev_deployment.resource_state_json is not None:
+                        prev_deployment.resource_state_json = None
+                        await db.commit()
+                    log_cb("=== Phase 1/2 complete: all existing resources destroyed ===")
+                else:
+                    log_cb("=== Phase 1/2: No existing resources to destroy — skipping ===")
+
+                log_cb("")
+                log_cb("=== Phase 2/2: Starting fresh AWS resource provisioning ===")
+
+                # ── Phase 2: Fresh deploy ─────────────────────────────────────────
+                deployed_resources = await executor.deploy(flat_configs, log_cb, llm=_deploy_llm)
+
+                created_resources = [r for r in deployed_resources if r.get("status") == "created"]
+                created_count = len(created_resources)
+                total_count = len(deployed_resources)
+                log_cb(f"=== Phase 2/2 complete: {created_count}/{total_count} resources created ===")
+
+                if created_resources:
+                    state_tracker.save_resources(deployment, created_resources)
+
+                if created_count == 0:
+                    deployment.status = "failed"
+                    deployment.error_message = f"All {total_count} resource(s) failed to provision. Check logs for details."
+                    new_project_status = "failed"
+                elif created_count < total_count:
+                    deployment.status = "partial_deployed"
+                    new_project_status = "partial_deployed"
+                else:
+                    deployment.status = "success"
+                    new_project_status = "deployed"
+
+            except Exception as e:
+                error_msg = str(e)
+                tb = traceback.format_exc()
+                combined_logs += f"\n\nERROR: {error_msg}\n{tb}"
+                short_err, detailed_err = _classify_deploy_error(combined_logs)
+                deployment.status = "failed"
+                deployment.error_message = short_err
+                deployment.error_details = detailed_err
+                new_project_status = "failed"
+                log_cb(f"[ERROR] {error_msg}")
+            finally:
+                deployment.logs = combined_logs
+                deployment.completed_at = datetime.now(timezone.utc)
+                await db.execute(
+                    update(Project)
+                    .where(Project.id == project_id)
+                    .values(status=new_project_status)
+                )
+                await db.commit()
+                print(f"[STREAM-REDEPLOY] project_id={project_id} status='{new_project_status}'")
+                log_queue.put_nowait(None)  # sentinel
+
+        task = asyncio.create_task(_run_redeploy())
+
+        while True:
+            item = await log_queue.get()
+            if item is None:
+                break
+            yield f"data: {item.rstrip()}\n\n"
+            await asyncio.sleep(0)
+
+        await task
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
 @router.post("/{project_id}/destroy", response_model=DeploymentResponse)
 async def destroy_project(
     project_id: int,

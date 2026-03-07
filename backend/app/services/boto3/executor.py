@@ -341,6 +341,60 @@ class Boto3Executor:
         return self._default_sg_cache
 
     @staticmethod
+    async def _find_available_cidr(
+        ec2_client: Any,
+        vpc_id: str,
+        vpc_cidr: str,
+        existing_cidrs: set[str],
+        _log: Callable,
+    ) -> str | None:
+        """
+        Find an available /24 CIDR within the VPC's address space that does
+        not overlap with any existing subnets.
+
+        Falls back to a set of common private ranges if the VPC CIDR can't be
+        parsed.
+        """
+        import ipaddress
+
+        try:
+            # Parse the VPC network (e.g. "10.0.0.0/16" → network object)
+            vpc_net = ipaddress.ip_network(vpc_cidr, strict=False)
+        except (ValueError, TypeError):
+            # If VPC CIDR is unparsable, try common fallback ranges
+            vpc_net = None
+
+        # Build set of existing networks for overlap checks
+        _existing_nets = set()
+        for c in existing_cidrs:
+            try:
+                _existing_nets.add(ipaddress.ip_network(c, strict=False))
+            except (ValueError, TypeError):
+                pass
+
+        def _overlaps(candidate: "ipaddress.IPv4Network") -> bool:
+            return any(candidate.overlaps(n) for n in _existing_nets)
+
+        if vpc_net:
+            # Iterate /24 subnets within the VPC CIDR
+            for subnet_candidate in vpc_net.subnets(new_prefix=24):
+                cidr_str = str(subnet_candidate)
+                if cidr_str not in existing_cidrs and not _overlaps(subnet_candidate):
+                    return cidr_str
+        else:
+            # Fallback: try 10.0.{100..254}.0/24
+            for third_octet in range(100, 255):
+                _c = f"10.0.{third_octet}.0/24"
+                try:
+                    _cn = ipaddress.ip_network(_c)
+                    if _c not in existing_cidrs and not _overlaps(_cn):
+                        return _c
+                except (ValueError, TypeError):
+                    pass
+
+        return None
+
+    @staticmethod
     def _resolve_network_placeholders(obj: Any, subnet_ids: list[str], sg_ids: list[str]) -> None:
         """
         Recursively walk a params dict and replace network placeholder strings:
@@ -450,14 +504,26 @@ class Boto3Executor:
         Ask the LLM to return a fixed version of the failed boto3 params.
         Returns a patched copy of cfg, or None if repair is not possible.
         """
-        # Errors that cannot be fixed by adjusting params alone
+        # ── Fast-reject: errors that cannot be fixed by tweaking params ──────
         _skip_codes = {
-            "AccessDenied", "UnauthorizedAccess", "InvalidClientTokenId",
-            "AuthFailure", "ServiceQuotaExceededException", "LimitExceededException",
-            "RequestLimitExceeded", "InsufficientInstanceCapacity",
+            # Auth / permissions
+            "AccessDenied", "AccessDeniedException", "UnauthorizedAccess",
+            "InvalidClientTokenId", "AuthFailure", "ExpiredToken",
+            "SignatureDoesNotMatch",
+            # Quota / limits — exact codes
+            "ServiceQuotaExceededException", "LimitExceededException",
+            "RequestLimitExceeded", "TooManyRequestsException", "Throttling",
+            "InsufficientInstanceCapacity",
+            # Not-found (dependency missing — params alone can't fix it)
             "ResourceNotFoundException", "NotFoundException",
         }
         if error_code in _skip_codes:
+            return None
+
+        # Also skip AWS-specific "LimitExceeded" codes that follow a pattern
+        # e.g. VpcLimitExceeded, InternetGatewayLimitExceeded, AddressLimitExceeded …
+        _lower_code = error_code.lower()
+        if "limitexceeded" in _lower_code or "quotaexceeded" in _lower_code:
             return None
 
         service = cfg.get("service", "")
@@ -470,55 +536,269 @@ class Boto3Executor:
             "Rules:\n"
             "- Only change what is necessary to fix the specific error\n"
             "- Keep all ARNs, names, and IDs exactly as provided unless they are the direct cause of the error\n"
+            "- If the error is about a duplicate / already-existing resource, try adjusting the name/identifier\n"
             "- If the error cannot be fixed by changing parameters (e.g. a dependency is missing), return {\"params\": null}\n"
             "- Do not add explanations — return only valid JSON"
         )
         user_prompt = (
             f"Service: {service}\nAction: {action}\n"
             f"Error Code: {error_code}\nError Message: {error_msg}\n\n"
-            f"Original params:\n{json.dumps(params, indent=2)}\n\n"
-            "Return the fixed params as {\"params\": {...}}."
+            f"Original params:\n{json.dumps(params, indent=2, default=str)}\n\n"
+            "Return the fixed params as {{\"params\": {{...}}}}."
         )
 
         try:
-            result = await llm.generate(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                temperature=0.1,
+            # Wrap in asyncio.wait_for to avoid hanging if the LLM is unresponsive
+            result = await asyncio.wait_for(
+                llm.generate(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    temperature=0.1,
+                ),
+                timeout=30,
             )
             if isinstance(result, dict) and result.get("params") is not None:
-                return {**cfg, "params": result["params"]}
+                fixed_params = result["params"]
+                # Sanity check: the LLM must return a dict for params
+                if not isinstance(fixed_params, dict):
+                    _log(f"  ⚠ LLM returned non-dict params ({type(fixed_params).__name__}) — skipping.\n")
+                    return None
+                return {**cfg, "params": fixed_params}
+            elif isinstance(result, dict) and result.get("params") is None:
+                # LLM explicitly said it can't fix this
+                return None
+            else:
+                _log(f"  ⚠ LLM returned unexpected shape — skipping repair.\n")
+                return None
+
+        except asyncio.TimeoutError:
+            _log(f"  ⚠ LLM repair timed out (30s) — skipping.\n")
+            return None
         except ValueError as _ve:
             # llm.generate() raised ValueError when it couldn't parse the response as
             # JSON. The raw LLM text is in the exception message — try to extract
             # {"params": ...} from it directly using brace matching.
             raw = str(_ve)
-            # Find the start of the params key
-            marker = raw.find('"params"')
+            # Remove the error prefix to get closer to the raw content
+            _prefix = "LLM response is not valid JSON: "
+            _raw_content = raw[raw.index(_prefix) + len(_prefix):] if _prefix in raw else raw
+
+            marker = _raw_content.find('"params"')
             if marker == -1:
-                marker = raw.find("'params'")
+                marker = _raw_content.find("'params'")
             if marker != -1:
-                # Walk back to the enclosing '{'
-                obj_start = raw.rfind('{', 0, marker)
+                obj_start = _raw_content.rfind('{', 0, marker)
                 if obj_start != -1:
                     depth = 0
-                    for _i in range(obj_start, len(raw)):
-                        if raw[_i] == '{':
+                    for _i in range(obj_start, len(_raw_content)):
+                        if _raw_content[_i] == '{':
                             depth += 1
-                        elif raw[_i] == '}':
+                        elif _raw_content[_i] == '}':
                             depth -= 1
                             if depth == 0:
-                                try:
-                                    _extracted = json.loads(raw[obj_start:_i + 1])
-                                    if isinstance(_extracted, dict) and _extracted.get("params") is not None:
-                                        return {**cfg, "params": _extracted["params"]}
-                                except json.JSONDecodeError:
-                                    pass
+                                _candidate = _raw_content[obj_start:_i + 1]
+                                # Try direct parse, then with trailing comma cleanup
+                                for _attempt_str in [_candidate, re.sub(r',\s*([}\]])', r'\1', _candidate)]:
+                                    try:
+                                        _extracted = json.loads(_attempt_str)
+                                        if isinstance(_extracted, dict) and isinstance(_extracted.get("params"), dict):
+                                            return {**cfg, "params": _extracted["params"]}
+                                    except json.JSONDecodeError:
+                                        pass
                                 break
-            _log(f"  LLM repair call error: {_ve}\n")
+            _log(f"  ⚠ LLM repair parse error: {str(_ve)[:120]}\n")
         except Exception as _e:
-            _log(f"  LLM repair call error: {_e}\n")
+            _log(f"  ⚠ LLM repair call failed: {str(_e)[:120]}\n")
         return None
+
+    # ── Reuse-Existing-Resource Fallback ─────────────────────────────────
+    # Mapping of (service, action) → async function that returns an existing resource ID
+    # Used when resource creation fails with a limit/quota exceeded error.
+
+    async def _find_existing_resource(
+        self,
+        cfg: dict,
+        error_code: str,
+        _log: Callable,
+    ) -> dict | None:
+        """
+        When a resource limit/quota is exceeded, try to find and reuse an
+        existing AWS resource of the same type.
+
+        Returns a dict with ``resource_id`` and ``reused: True`` on success,
+        or ``None`` if no suitable existing resource was found.
+        """
+        service = cfg.get("service", "")
+        action = cfg.get("action", "")
+        params = cfg.get("params", {})
+        label = cfg.get("label", f"{service}.{action}")
+
+        try:
+            # ---- EC2: VPC ------------------------------------------------
+            if service == "ec2" and action == "create_vpc":
+                ec2 = self._get_client("ec2")
+                resp = await asyncio.to_thread(
+                    ec2.describe_vpcs,
+                    Filters=[{"Name": "state", "Values": ["available"]}],
+                )
+                vpcs = resp.get("Vpcs", [])
+                if vpcs:
+                    default = [v for v in vpcs if v.get("IsDefault")]
+                    chosen = (default or vpcs)[0]
+                    vpc_id = chosen["VpcId"]
+                    _log(f"  ♻ Reusing existing VPC: {vpc_id}\n")
+                    return {"resource_id": vpc_id, "reused": True}
+
+            # ---- EC2: Subnet ---------------------------------------------
+            elif service == "ec2" and action == "create_subnet":
+                ec2 = self._get_client("ec2")
+                vpc_id = params.get("VpcId")
+                filters: list[dict] = [{"Name": "state", "Values": ["available"]}]
+                if vpc_id:
+                    filters.append({"Name": "vpc-id", "Values": [vpc_id]})
+                resp = await asyncio.to_thread(ec2.describe_subnets, Filters=filters)
+                subnets = resp.get("Subnets", [])
+                if subnets:
+                    az = params.get("AvailabilityZone")
+                    if az:
+                        matched = [s for s in subnets if s.get("AvailabilityZone") == az]
+                        chosen = matched[0] if matched else subnets[0]
+                    else:
+                        chosen = subnets[0]
+                    subnet_id = chosen["SubnetId"]
+                    _log(f"  ♻ Reusing existing subnet: {subnet_id} (AZ: {chosen.get('AvailabilityZone', '?')})\n")
+                    return {"resource_id": subnet_id, "reused": True}
+
+            # ---- EC2: Security Group -------------------------------------
+            elif service == "ec2" and action == "create_security_group":
+                ec2 = self._get_client("ec2")
+                vpc_id = params.get("VpcId")
+                filters = []
+                if vpc_id:
+                    filters.append({"Name": "vpc-id", "Values": [vpc_id]})
+                resp = await asyncio.to_thread(ec2.describe_security_groups, Filters=filters)
+                sgs = resp.get("SecurityGroups", [])
+                if sgs:
+                    default_sg = [s for s in sgs if s.get("GroupName") == "default"]
+                    chosen = (default_sg or sgs)[0]
+                    sg_id = chosen["GroupId"]
+                    _log(f"  ♻ Reusing existing security group: {sg_id} ({chosen.get('GroupName', '')})\n")
+                    return {"resource_id": sg_id, "reused": True}
+
+            # ---- EC2: Internet Gateway -----------------------------------
+            elif service == "ec2" and action == "create_internet_gateway":
+                ec2 = self._get_client("ec2")
+                resp = await asyncio.to_thread(ec2.describe_internet_gateways)
+                igws = resp.get("InternetGateways", [])
+                if igws:
+                    igw_id = igws[0]["InternetGatewayId"]
+                    _log(f"  ♻ Reusing existing Internet Gateway: {igw_id}\n")
+                    return {"resource_id": igw_id, "reused": True}
+
+            # ---- EC2: Elastic IP -----------------------------------------
+            elif service == "ec2" and action == "allocate_address":
+                ec2 = self._get_client("ec2")
+                resp = await asyncio.to_thread(ec2.describe_addresses)
+                addrs = resp.get("Addresses", [])
+                unassociated = [a for a in addrs if not a.get("AssociationId")]
+                if unassociated:
+                    eip = unassociated[0]
+                    alloc_id = eip.get("AllocationId", "")
+                    _log(f"  ♻ Reusing unassociated Elastic IP: {alloc_id} ({eip.get('PublicIp', '')})\n")
+                    return {"resource_id": alloc_id, "reused": True}
+
+            # ---- EC2: NAT Gateway ----------------------------------------
+            elif service == "ec2" and action == "create_nat_gateway":
+                ec2 = self._get_client("ec2")
+                resp = await asyncio.to_thread(
+                    ec2.describe_nat_gateways,
+                    Filter=[{"Name": "state", "Values": ["available"]}],
+                )
+                ngws = resp.get("NatGateways", [])
+                if ngws:
+                    ngw_id = ngws[0]["NatGatewayId"]
+                    _log(f"  ♻ Reusing existing NAT Gateway: {ngw_id}\n")
+                    return {"resource_id": ngw_id, "reused": True}
+
+            # ---- EC2: Route Table ----------------------------------------
+            elif service == "ec2" and action == "create_route_table":
+                ec2 = self._get_client("ec2")
+                vpc_id = params.get("VpcId")
+                filters = []
+                if vpc_id:
+                    filters.append({"Name": "vpc-id", "Values": [vpc_id]})
+                resp = await asyncio.to_thread(ec2.describe_route_tables, Filters=filters)
+                rts = resp.get("RouteTables", [])
+                if rts:
+                    main = [r for r in rts for a in r.get("Associations", []) if a.get("Main")]
+                    chosen = (main or rts)[0]
+                    rt_id = chosen["RouteTableId"]
+                    _log(f"  ♻ Reusing existing route table: {rt_id}\n")
+                    return {"resource_id": rt_id, "reused": True}
+
+            # ---- EC2: Network ACL ----------------------------------------
+            elif service == "ec2" and action == "create_network_acl":
+                ec2 = self._get_client("ec2")
+                vpc_id = params.get("VpcId")
+                filters = []
+                if vpc_id:
+                    filters.append({"Name": "vpc-id", "Values": [vpc_id]})
+                resp = await asyncio.to_thread(ec2.describe_network_acls, Filters=filters)
+                nacls = resp.get("NetworkAcls", [])
+                if nacls:
+                    default_nacl = [n for n in nacls if n.get("IsDefault")]
+                    chosen = (default_nacl or nacls)[0]
+                    nacl_id = chosen["NetworkAclId"]
+                    _log(f"  ♻ Reusing existing Network ACL: {nacl_id}\n")
+                    return {"resource_id": nacl_id, "reused": True}
+
+            # ---- RDS: DB Subnet Group ------------------------------------
+            elif service == "rds" and action == "create_db_subnet_group":
+                rds = self._get_client("rds")
+                resp = await asyncio.to_thread(rds.describe_db_subnet_groups)
+                groups = resp.get("DBSubnetGroups", [])
+                if groups:
+                    grp_name = groups[0]["DBSubnetGroupName"]
+                    _log(f"  ♻ Reusing existing DB subnet group: {grp_name}\n")
+                    return {"resource_id": grp_name, "reused": True}
+
+            # ---- ElastiCache: Cache Subnet Group -------------------------
+            elif service == "elasticache" and action == "create_cache_subnet_group":
+                ec = self._get_client("elasticache")
+                resp = await asyncio.to_thread(ec.describe_cache_subnet_groups)
+                groups = resp.get("CacheSubnetGroups", [])
+                if groups:
+                    grp_name = groups[0]["CacheSubnetGroupName"]
+                    _log(f"  ♻ Reusing existing cache subnet group: {grp_name}\n")
+                    return {"resource_id": grp_name, "reused": True}
+
+            # ---- EFS: File System ----------------------------------------
+            elif service == "efs" and action == "create_file_system":
+                efs = self._get_client("efs")
+                resp = await asyncio.to_thread(efs.describe_file_systems)
+                fss = resp.get("FileSystems", [])
+                available = [f for f in fss if f.get("LifeCycleState") == "available"]
+                if available:
+                    fs_id = available[0]["FileSystemId"]
+                    _log(f"  ♻ Reusing existing EFS: {fs_id}\n")
+                    return {"resource_id": fs_id, "reused": True}
+
+        except Exception as e:
+            _log(f"  ⚠ Could not find existing {label} to reuse: {str(e)[:100]}\n")
+
+        return None
+
+    @staticmethod
+    def _is_limit_exceeded_error(error_code: str) -> bool:
+        """Return True if the AWS error code indicates a limit/quota was exceeded."""
+        _exact = {
+            "ServiceQuotaExceededException", "LimitExceededException",
+            "RequestLimitExceeded", "InsufficientInstanceCapacity",
+        }
+        if error_code in _exact:
+            return True
+        _lc = error_code.lower()
+        return "limitexceeded" in _lc or "quotaexceeded" in _lc
 
     async def deploy(
         self,
@@ -559,11 +839,38 @@ class Boto3Executor:
         _log(f"Starting deployment of {len(configs)} resource(s)...\n")
 
         last_resource_id: str | None = None   # tracks the most recently created resource ID
+        _llm_disabled = False  # set True if LLM auth fails once — don't retry every resource
+
+        # ── Cross-resource reference tracking ────────────────────────────────
+        _ref_map: dict[str, str] = {}      # tool_node_id → resource_id
+        _vpc_id: str | None = None         # most recently created/reused VPC ID
+        _first_public_subnet: str | None = None  # first public subnet
+        _ssm_resolved: str | None = None   # last SSM parameter lookup result
 
         for i, cfg in enumerate(configs, 1):
             # Resolve the __RESOLVE_PREV__ placeholder with the last successfully created resource ID
             if last_resource_id and "__RESOLVE_PREV__" in json.dumps(cfg):
                 self._replace_placeholders(cfg, {"__RESOLVE_PREV__": last_resource_id})
+
+            # ── Resolve cross-resource reference placeholders ────────────────
+            _cfg_str = json.dumps(cfg)
+            _cross_replacements: dict[str, str] = {}
+            if "__VPC_ID__" in _cfg_str and _vpc_id:
+                _cross_replacements["__VPC_ID__"] = _vpc_id
+            if "__SSM_RESOLVED__" in _cfg_str and _ssm_resolved:
+                _cross_replacements["__SSM_RESOLVED__"] = _ssm_resolved
+            if "__FIRST_PUBLIC_SUBNET__" in _cfg_str and _first_public_subnet:
+                _cross_replacements["__FIRST_PUBLIC_SUBNET__"] = _first_public_subnet
+            # __RESOLVE_REF__:node_id  →  look up node_id in _ref_map
+            for _ref_match in re.finditer(r'__RESOLVE_REF__:([^"\\]+)', _cfg_str):
+                _ref_key = _ref_match.group(1)
+                if _ref_key in _ref_map:
+                    _cross_replacements[f"__RESOLVE_REF__:{_ref_key}"] = _ref_map[_ref_key]
+                elif _vpc_id:
+                    # Fallback: if the ref looks like it targets a VPC, use the known VPC
+                    _cross_replacements[f"__RESOLVE_REF__:{_ref_key}"] = _vpc_id
+            if _cross_replacements:
+                self._replace_placeholders(cfg, _cross_replacements)
 
             # Auto-provision VPC + subnets + DB subnet group for RDS cluster if none specified
             if cfg.get("service") == "rds" and cfg.get("action") == "create_db_cluster":
@@ -593,6 +900,46 @@ class Boto3Executor:
                         cfg["params"] = params
                     except Exception as net_err:
                         _log(f"  âš  Auto-networking failed: {net_err}\n")
+                cfg["params"] = params
+
+            # Strip MapPublicIpOnLaunch from create_subnet (not a valid param)
+            if cfg.get("service") == "ec2" and cfg.get("action") == "create_subnet":
+                params = cfg.get("params", {})
+                _map_pub_ip = params.pop("MapPublicIpOnLaunch", None)
+                if _map_pub_ip is not None:
+                    cfg["_map_public_ip"] = bool(_map_pub_ip)
+
+                # ── Fix CIDR conflicts when reusing an existing VPC ──────────
+                # The LLM-generated CIDR may overlap with subnets already in the
+                # VPC.  Detect the conflict and pick a free /24 from the VPC's
+                # CIDR block.
+                _sub_vpc = params.get("VpcId") or _vpc_id
+                _sub_cidr = params.get("CidrBlock", "")
+                if _sub_vpc and _sub_cidr:
+                    try:
+                        _sub_ec2 = self._get_client("ec2")
+                        _sub_resp = await asyncio.to_thread(
+                            _sub_ec2.describe_subnets,
+                            Filters=[{"Name": "vpc-id", "Values": [_sub_vpc]}],
+                        )
+                        _existing_cidrs = {
+                            s["CidrBlock"] for s in _sub_resp.get("Subnets", [])
+                        }
+                        if _sub_cidr in _existing_cidrs:
+                            # Get VPC CIDR to know the address space
+                            _vpc_resp = await asyncio.to_thread(
+                                _sub_ec2.describe_vpcs, VpcIds=[_sub_vpc]
+                            )
+                            _vpc_cidr = _vpc_resp["Vpcs"][0]["CidrBlock"] if _vpc_resp.get("Vpcs") else ""
+                            _new_cidr = await self._find_available_cidr(
+                                _sub_ec2, _sub_vpc, _vpc_cidr, _existing_cidrs, _log
+                            )
+                            if _new_cidr:
+                                _log(f"  🔧 CIDR {_sub_cidr} conflicts — using {_new_cidr} instead.\n")
+                                params["CidrBlock"] = _new_cidr
+                    except Exception as _cidr_err:
+                        _log(f"  ⚠ Could not check/fix subnet CIDR: {_cidr_err}\n")
+
                 cfg["params"] = params
 
             # Sanitize S3 bucket names â€” no underscores, max 63 chars, lowercase
@@ -848,7 +1195,14 @@ class Boto3Executor:
                     "status": "created",
                     "response_summary": self._summarize_response(result),
                 }
-                deployed.append(record)
+                # Don't persist lookup-only or support-only (no delete) records
+                # -- they aren't real provisioned resources and clutter destroy.
+                _skip_persist = (
+                    cfg.get("is_lookup")
+                    or (cfg.get("is_support") and not cfg.get("delete_action"))
+                )
+                if not _skip_persist:
+                    deployed.append(record)
                 _log(f"  âœ“ Created {label} (ID: {resource_id or 'N/A'})\n")
 
                 # EC2: store key pair fields now; SSH instructions logged AFTER waiter (real IP needed)
@@ -865,6 +1219,52 @@ class Boto3Executor:
                 # Update last_resource_id for __RESOLVE_PREV__ in subsequent configs
                 if resource_id:
                     last_resource_id = resource_id
+
+                # ── Update cross-resource reference maps ─────────────────────
+                if resource_id:
+                    _node_id = cfg.get("_tool_node_id")
+                    if _node_id:
+                        _ref_map[_node_id] = resource_id
+                    if action == "create_vpc":
+                        _vpc_id = resource_id
+                    if action == "create_subnet" and "public" in label.lower():
+                        if not _first_public_subnet:
+                            _first_public_subnet = resource_id
+                    if cfg.get("is_lookup") and service == "ssm":
+                        _ssm_resolved = resource_id  # SSM returns param value as resource_id
+
+                # ── Execute post_create actions (e.g. VPC modify_vpc_attribute) ──
+                if cfg.get("post_create") and resource_id:
+                    for _pc in cfg["post_create"]:
+                        _pc_action = _pc.get("action")
+                        _pc_tmpl = _pc.get("params_template", {})
+                        _pc_params: dict[str, Any] = {}
+                        for _pk, _pv in _pc_tmpl.items():
+                            if _pv == "__RESOURCE_ID__":
+                                _pc_params[_pk] = resource_id
+                            elif _pv == "__VPC_ID__" and _vpc_id:
+                                _pc_params[_pk] = _vpc_id
+                            else:
+                                _pc_params[_pk] = _pv
+                        try:
+                            _pc_client = self._get_client(service)
+                            await asyncio.to_thread(getattr(_pc_client, _pc_action), **_pc_params)
+                            _log(f"  \u2713 Post-create: {_pc_action}\n")
+                        except Exception as _pc_err:
+                            _log(f"  \u26a0 Post-create {_pc_action} failed: {_pc_err}\n")
+
+                # ── Apply MapPublicIpOnLaunch via modify_subnet_attribute ─────
+                if action == "create_subnet" and resource_id and cfg.get("_map_public_ip"):
+                    try:
+                        _sub_ec2 = self._get_client("ec2")
+                        await asyncio.to_thread(
+                            _sub_ec2.modify_subnet_attribute,
+                            SubnetId=resource_id,
+                            MapPublicIpOnLaunch={"Value": True},
+                        )
+                        _log(f"  \u2713 Enabled auto-assign public IP for {resource_id}\n")
+                    except Exception as _mpl_err:
+                        _log(f"  \u26a0 Could not enable MapPublicIpOnLaunch: {_mpl_err}\n")
 
                 # CloudTrail: apply tags via add_tags (not supported in create_trail)
                 if service == "cloudtrail" and cfg.get("_pending_tags") and resource_id:
@@ -944,15 +1344,75 @@ class Boto3Executor:
                     "DBClusterAlreadyExistsFault",
                     "DBInstanceAlreadyExists",
                     "DBSubnetGroupAlreadyExists",
-                    "InvalidChangeBatch",  # Route53 record already exists
+                    "InvalidChangeBatch",       # Route53 record already exists
+                    "InvalidGroup.Duplicate",   # Security Group duplicate
+                    "ClusterAlreadyExistsFault",
+                    "TableAlreadyExists",
+                    "ResourceInUseException",
+                    "StreamAlreadyExists",
                 }
                 if error_code in _already_exists_codes:
-                    _log(f"  â„¹ {label} already exists â€” treating as success.\n")
+                    _log(f"  ℹ {label} already exists — treating as success.\n")
+
+                    # ── Try to resolve the actual resource ID so __RESOLVE_PREV__
+                    #    and delete_params work correctly for downstream resources.
+                    _existing_id: str | None = None
+                    try:
+                        if service == "ec2" and action == "create_security_group":
+                            _sg_ec2 = self._get_client("ec2")
+                            _sg_name = cfg.get("params", {}).get("GroupName", "")
+                            _sg_vpc = cfg.get("params", {}).get("VpcId", "") or _vpc_id or ""
+                            _sg_filters: list[dict] = []
+                            if _sg_name:
+                                _sg_filters.append({"Name": "group-name", "Values": [_sg_name]})
+                            if _sg_vpc:
+                                _sg_filters.append({"Name": "vpc-id", "Values": [_sg_vpc]})
+                            if _sg_filters:
+                                _sg_resp = await asyncio.to_thread(
+                                    _sg_ec2.describe_security_groups, Filters=_sg_filters
+                                )
+                                _sg_list = _sg_resp.get("SecurityGroups", [])
+                                if _sg_list:
+                                    _existing_id = _sg_list[0]["GroupId"]
+                                    _log(f"  ℹ Resolved existing security group: {_existing_id}\n")
+                        elif service == "s3" and action == "create_bucket":
+                            _existing_id = cfg.get("params", {}).get("Bucket")
+                        elif service == "dynamodb" and action == "create_table":
+                            _existing_id = cfg.get("params", {}).get("TableName")
+                        elif service == "rds" and action == "create_db_instance":
+                            _existing_id = cfg.get("params", {}).get("DBInstanceIdentifier")
+                        elif service == "rds" and action == "create_db_cluster":
+                            _existing_id = cfg.get("params", {}).get("DBClusterIdentifier")
+                        elif service == "iam" and action == "create_role":
+                            _existing_id = cfg.get("params", {}).get("RoleName")
+                            # Try to get the ARN
+                            try:
+                                _iam_c = self._get_client("iam")
+                                _role_resp = await asyncio.to_thread(
+                                    _iam_c.get_role, RoleName=_existing_id
+                                )
+                                _existing_id = _role_resp["Role"]["Arn"]
+                            except Exception:
+                                pass
+                    except Exception as _lookup_err:
+                        _log(f"  ⚠ Could not look up existing resource ID: {_lookup_err}\n")
+
+                    if _existing_id:
+                        last_resource_id = _existing_id
+                        _node_id = cfg.get("_tool_node_id")
+                        if _node_id:
+                            _ref_map[_node_id] = _existing_id
+                        if action == "create_vpc":
+                            _vpc_id = _existing_id
+                        if action == "create_subnet" and "public" in label.lower():
+                            if not _first_public_subnet:
+                                _first_public_subnet = _existing_id
+
                     deployed.append({
                         "service": service,
                         "action": action,
                         "label": label,
-                        "resource_id": None,
+                        "resource_id": _existing_id,
                         "resource_type": cfg.get("resource_type", service),
                         "delete_action": cfg.get("delete_action"),
                         "delete_params_key": cfg.get("delete_params_key"),
@@ -962,10 +1422,49 @@ class Boto3Executor:
                     })
                     continue
 
-                _log(f"  âœ— FAILED: [{error_code}] {error_msg}\n")
-                if llm is not None:
-                    _log(f"  \U0001f916 Attempting LLM-assisted repair for {label}...\n")
-                    _fixed = await self._repair_failed_config(cfg, error_code, error_msg, llm, _log)
+                # ── Limit/quota exceeded fallback: reuse existing resource ──
+                if self._is_limit_exceeded_error(error_code):
+                    _log(f"  ⚠ Limit exceeded: [{error_code}] {error_msg}\n")
+                    _log(f"  🔍 Searching for an existing {label} to reuse...\n")
+                    _existing = await self._find_existing_resource(cfg, error_code, _log)
+                    if _existing is not None:
+                        deployed.append({
+                            "service": service,
+                            "action": action,
+                            "label": label,
+                            "resource_id": _existing["resource_id"],
+                            "resource_type": cfg.get("resource_type", service),
+                            "delete_action": None,       # don't delete reused resources
+                            "delete_params_key": None,
+                            "delete_params": None,
+                            "status": "created",
+                            "response_summary": {"note": f"reused existing (limit exceeded: {error_code})"},
+                        })
+                        if _existing["resource_id"]:
+                            last_resource_id = _existing["resource_id"]
+                            # Update cross-resource reference maps for reused resources
+                            _reused_id = _existing["resource_id"]
+                            _node_id = cfg.get("_tool_node_id")
+                            if _node_id:
+                                _ref_map[_node_id] = _reused_id
+                            if action == "create_vpc":
+                                _vpc_id = _reused_id
+                            if action == "create_subnet" and "public" in label.lower():
+                                if not _first_public_subnet:
+                                    _first_public_subnet = _reused_id
+                        continue
+                    else:
+                        _log(f"  ℹ No suitable existing resource found to reuse.\n")
+
+                _log(f"  ✗ FAILED: [{error_code}] {error_msg}\n")
+                if llm is not None and not _llm_disabled:
+                    _log(f"  🤖 Attempting LLM-assisted repair for {label}...\n")
+                    try:
+                        _fixed = await self._repair_failed_config(cfg, error_code, error_msg, llm, _log)
+                    except Exception as _repair_err:
+                        _llm_disabled = True
+                        _log(f"  ⚠ LLM repair unavailable ({str(_repair_err)[:80]}) — disabling for remaining resources.\n")
+                        _fixed = None
                     if _fixed is not None:
                         try:
                             result = await self._execute_call(_fixed)
@@ -975,24 +1474,68 @@ class Boto3Executor:
                                     resource_id = self._extract_resource_id(result, _fixed["resource_id_path"])
                                 except Exception:
                                     pass
-                            _log(f"  \u2713 Repaired and created {label} (ID: {resource_id or 'N/A'})\n")
+                            _log(f"  ✓ Repaired and created {label} (ID: {resource_id or 'N/A'})\n")
                             deployed.append({
                                 "service": service, "action": action, "label": label,
                                 "resource_id": resource_id,
                                 "resource_type": cfg.get("resource_type", service),
-                                "delete_action": cfg.get("delete_action"),
-                                "delete_params_key": cfg.get("delete_params_key"),
-                                "delete_params": cfg.get("delete_params"),
+                                "delete_action": _fixed.get("delete_action") or cfg.get("delete_action"),
+                                "delete_params_key": _fixed.get("delete_params_key") or cfg.get("delete_params_key"),
+                                "delete_params": _fixed.get("delete_params") or cfg.get("delete_params"),
                                 "status": "created",
                                 "response_summary": self._summarize_response(result),
                             })
                             if resource_id:
                                 last_resource_id = resource_id
+                                # Update cross-ref maps for repaired resources
+                                _node_id = cfg.get("_tool_node_id")
+                                if _node_id:
+                                    _ref_map[_node_id] = resource_id
+                                if action == "create_vpc":
+                                    _vpc_id = resource_id
+                                if action == "create_subnet" and "public" in label.lower():
+                                    if not _first_public_subnet:
+                                        _first_public_subnet = resource_id
                             continue
+                        except ClientError as _re:
+                            _re_code = _re.response["Error"]["Code"]
+                            _re_msg = _re.response["Error"]["Message"]
+                            _log(f"  ✗ Repair attempt also failed: [{_re_code}] {_re_msg}\n")
                         except Exception as _re:
-                            _log(f"  \u2717 Repair attempt also failed: {_re}\n")
+                            _log(f"  ✗ Repair attempt also failed: {_re}\n")
                     else:
-                        _log(f"  \u2139 LLM could not suggest a fix for this error type.\n")
+                        _log(f"  ℹ LLM could not suggest a fix for this error type.\n")
+
+                # ── Last-resort fallback: try to reuse an existing resource ──
+                # For certain resource types (subnets, SGs), if both LLM repair
+                # and the initial attempt failed, try to find one to reuse.
+                if service == "ec2" and action in ("create_subnet", "create_security_group"):
+                    _log(f"  🔍 Searching for an existing {label} to reuse...\n")
+                    _fallback = await self._find_existing_resource(cfg, error_code, _log)
+                    if _fallback is not None:
+                        deployed.append({
+                            "service": service,
+                            "action": action,
+                            "label": label,
+                            "resource_id": _fallback["resource_id"],
+                            "resource_type": cfg.get("resource_type", service),
+                            "delete_action": None,
+                            "delete_params_key": None,
+                            "delete_params": None,
+                            "status": "created",
+                            "response_summary": {"note": f"reused existing (after {error_code})"},
+                        })
+                        if _fallback["resource_id"]:
+                            last_resource_id = _fallback["resource_id"]
+                            _reused_id = _fallback["resource_id"]
+                            _node_id = cfg.get("_tool_node_id")
+                            if _node_id:
+                                _ref_map[_node_id] = _reused_id
+                            if action == "create_subnet" and "public" in label.lower():
+                                if not _first_public_subnet:
+                                    _first_public_subnet = _reused_id
+                        continue
+
                 deployed.append({
                     "service": service,
                     "action": action,
@@ -1002,10 +1545,15 @@ class Boto3Executor:
                     "error_message": error_msg,
                 })
             except (BotoCoreError, Exception) as e:
-                _log(f"  \u2717 FAILED: {str(e)}\n")
-                if llm is not None:
-                    _log(f"  \U0001f916 Attempting LLM-assisted repair for {label}...\n")
-                    _fixed = await self._repair_failed_config(cfg, "Exception", str(e), llm, _log)
+                _log(f"  ✗ FAILED: {str(e)}\n")
+                if llm is not None and not _llm_disabled:
+                    _log(f"  🤖 Attempting LLM-assisted repair for {label}...\n")
+                    try:
+                        _fixed = await self._repair_failed_config(cfg, "Exception", str(e), llm, _log)
+                    except Exception as _repair_err:
+                        _llm_disabled = True
+                        _log(f"  ⚠ LLM repair unavailable ({str(_repair_err)[:80]}) — disabling for remaining resources.\n")
+                        _fixed = None
                     if _fixed is not None:
                         try:
                             result = await self._execute_call(_fixed)
@@ -1015,24 +1563,32 @@ class Boto3Executor:
                                     resource_id = self._extract_resource_id(result, _fixed["resource_id_path"])
                                 except Exception:
                                     pass
-                            _log(f"  \u2713 Repaired and created {label} (ID: {resource_id or 'N/A'})\n")
+                            _log(f"  ✓ Repaired and created {label} (ID: {resource_id or 'N/A'})\n")
                             deployed.append({
                                 "service": service, "action": action, "label": label,
                                 "resource_id": resource_id,
                                 "resource_type": cfg.get("resource_type", service),
-                                "delete_action": cfg.get("delete_action"),
-                                "delete_params_key": cfg.get("delete_params_key"),
-                                "delete_params": cfg.get("delete_params"),
+                                "delete_action": _fixed.get("delete_action") or cfg.get("delete_action"),
+                                "delete_params_key": _fixed.get("delete_params_key") or cfg.get("delete_params_key"),
+                                "delete_params": _fixed.get("delete_params") or cfg.get("delete_params"),
                                 "status": "created",
                                 "response_summary": self._summarize_response(result),
                             })
                             if resource_id:
                                 last_resource_id = resource_id
+                                _node_id = cfg.get("_tool_node_id")
+                                if _node_id:
+                                    _ref_map[_node_id] = resource_id
+                                if action == "create_vpc":
+                                    _vpc_id = resource_id
+                                if action == "create_subnet" and "public" in label.lower():
+                                    if not _first_public_subnet:
+                                        _first_public_subnet = resource_id
                             continue
                         except Exception as _re:
-                            _log(f"  \u2717 Repair attempt also failed: {_re}\n")
+                            _log(f"  ✗ Repair attempt also failed: {_re}\n")
                     else:
-                        _log(f"  \u2139 LLM could not suggest a fix for this error type.\n")
+                        _log(f"  ℹ LLM could not suggest a fix for this error type.\n")
                 deployed.append({
                     "service": service,
                     "action": action,
@@ -1040,6 +1596,7 @@ class Boto3Executor:
                     "status": "failed",
                     "error_message": str(e),
                 })
+
 
         succeeded = sum(1 for r in deployed if r["status"] == "created")
         _log(f"\nDeployment complete: {succeeded}/{len(configs)} resources created.\n")
@@ -1064,23 +1621,55 @@ class Boto3Executor:
 
         # Reverse order for proper dependency teardown
         records = list(reversed(resource_records))
-        _log(f"Starting destruction of {len(records)} resource(s)...\n")
 
-        for i, record in enumerate(records, 1):
+        # Filter out records that have no delete action (lookups, support-only,
+        # reused resources).  They are not owned by this deployment.
+        deletable = [r for r in records if r.get("delete_action")]
+        skipped = [r for r in records if not r.get("delete_action")]
+        for sr in skipped:
+            _label = sr.get("label", "unknown")
+            _summary = sr.get("response_summary") or {}
+            _note = _summary.get("note", "") if isinstance(_summary, dict) else ""
+            if "reused" in _note:
+                _log(f"  ↳ Skipping {_label} — reused resource (not owned by this deployment).\n")
+            # else: silently skip lookups / support records
+            results.append({**sr, "destroy_status": "skipped"})
+
+        _log(f"Starting destruction of {len(deletable)} resource(s)...\n")
+
+        for i, record in enumerate(deletable, 1):
             label = record.get("label", "unknown")
             delete_action = record.get("delete_action")
             resource_id = record.get("resource_id")
 
-            if not delete_action:
-                _log(f"[{i}/{len(records)}] Skipping {label} â€” no delete action configured.\n")
-                results.append({**record, "destroy_status": "skipped"})
-                continue
-
-            _log(f"[{i}/{len(records)}] Destroying {label}...\n")
+            _log(f"[{i}/{len(deletable)}] Destroying {label}...\n")
 
             try:
                 service = record.get("service", "unknown")
                 client = self._get_client(service)
+
+                # ── If resource_id is missing, try to resolve it ─────────────
+                if not resource_id:
+                    try:
+                        if service == "ec2" and delete_action == "delete_security_group":
+                            # Try finding the SG by name from the original create params
+                            _dp = record.get("delete_params") or {}
+                            _sg_name = _dp.get("GroupName") or ""
+                            if _sg_name:
+                                _sg_resp = await asyncio.to_thread(
+                                    client.describe_security_groups,
+                                    Filters=[{"Name": "group-name", "Values": [_sg_name]}],
+                                )
+                                _sg_list = _sg_resp.get("SecurityGroups", [])
+                                if _sg_list:
+                                    resource_id = _sg_list[0]["GroupId"]
+                                    _log(f"  ℹ Resolved {label} → {resource_id}\n")
+                    except Exception:
+                        pass
+                    if not resource_id:
+                        _log(f"  ⚠ Skipping {label} — no resource ID available.\n")
+                        results.append({**record, "destroy_status": "skipped", "destroy_error": "No resource ID"})
+                        continue
 
                 # Build delete params
                 # Use `or {}` rather than a default to handle explicit null stored in JSON
@@ -1091,6 +1680,14 @@ class Boto3Executor:
                         or record["delete_params_key"].endswith("Ids")
                         else resource_id
                     )
+
+                # Replace __RESOURCE_ID__ placeholder with the real resource_id.
+                # delete_params are stored verbatim from the config template, so
+                # the placeholder must be substituted before calling the AWS API.
+                if resource_id and delete_params and "__RESOURCE_ID__" in json.dumps(delete_params):
+                    params_str = json.dumps(delete_params)
+                    params_str = params_str.replace('"__RESOURCE_ID__"', json.dumps(resource_id))
+                    delete_params = json.loads(params_str)
 
                 # Special pre-delete cleanup
                 await self._pre_delete_cleanup(service, record, client, _log)
@@ -1110,7 +1707,7 @@ class Boto3Executor:
                 results.append({**record, "destroy_status": "failed", "destroy_error": str(e)})
 
         succeeded = sum(1 for r in results if r.get("destroy_status") == "destroyed")
-        _log(f"\nDestruction complete: {succeeded}/{len(records)} resources destroyed.\n")
+        _log(f"\nDestruction complete: {succeeded}/{len(deletable)} resources destroyed.\n")
 
         return results
 
@@ -1210,6 +1807,57 @@ class Boto3Executor:
                 await asyncio.to_thread(bucket.object_versions.all().delete)
             except Exception as e:
                 _log(f"  âš  Bucket cleanup warning: {e}\n")
+
+
+        # IGW must be detached from its VPC before it can be deleted
+        if service == "ec2" and record.get("delete_action") == "delete_internet_gateway" and resource_id:
+            try:
+                resp = await asyncio.to_thread(
+                    client.describe_internet_gateways,
+                    InternetGatewayIds=[resource_id],
+                )
+                igws = resp.get("InternetGateways", [])
+                if igws:
+                    for attachment in igws[0].get("Attachments", []):
+                        vpc_id = attachment.get("VpcId")
+                        if vpc_id:
+                            _log(f"  ↩ Detaching IGW {resource_id} from VPC {vpc_id}...\n")
+                            await asyncio.to_thread(
+                                client.detach_internet_gateway,
+                                InternetGatewayId=resource_id,
+                                VpcId=vpc_id,
+                            )
+            except ClientError as e:
+                _log(f"  ⚠ IGW detach warning: {e.response['Error']['Message']}\n")
+            except Exception as e:
+                _log(f"  ⚠ IGW detach warning: {e}\n")
+
+        # Security Groups — revoke all rules before deletion to avoid dependency errors
+        if service == "ec2" and record.get("delete_action") == "delete_security_group" and resource_id:
+            try:
+                resp = await asyncio.to_thread(
+                    client.describe_security_groups,
+                    GroupIds=[resource_id],
+                )
+                sgs = resp.get("SecurityGroups", [])
+                if sgs:
+                    sg = sgs[0]
+                    if sg.get("IpPermissions"):
+                        await asyncio.to_thread(
+                            client.revoke_security_group_ingress,
+                            GroupId=resource_id,
+                            IpPermissions=sg["IpPermissions"],
+                        )
+                    if sg.get("IpPermissionsEgress"):
+                        await asyncio.to_thread(
+                            client.revoke_security_group_egress,
+                            GroupId=resource_id,
+                            IpPermissions=sg["IpPermissionsEgress"],
+                        )
+            except ClientError:
+                pass
+            except Exception:
+                pass
 
     @staticmethod
     def _summarize_response(response: dict | None) -> dict:
