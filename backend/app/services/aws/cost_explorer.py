@@ -171,12 +171,19 @@ class CostExplorerService:
                 },
             )
             for rec in response.get("RightsizingRecommendations", [])[:5]:
-                savings = float(
+                _est_savings = (
                     rec.get("ModifyRecommendationDetail", {})
                     .get("TargetInstances", [{}])[0]
-                    .get("EstimatedMonthlySavings", {})
-                    .get("Value", 0)
+                    .get("EstimatedMonthlySavings", 0)
                 )
+                # AWS may return a dict {"Value": "12.5", "Currency": "USD"} or a plain string/number
+                if isinstance(_est_savings, dict):
+                    savings = float(_est_savings.get("Value", 0))
+                else:
+                    try:
+                        savings = float(_est_savings)
+                    except (ValueError, TypeError):
+                        savings = 0.0
                 recommendations.append(CostRecommendation(
                     service="EC2",
                     recommendation=f"Right-size instance: {rec.get('CurrentInstance', {}).get('ResourceId', 'unknown')}",

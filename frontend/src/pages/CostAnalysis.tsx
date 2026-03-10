@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import {
     DollarSign,
     TrendingUp,
@@ -11,6 +12,16 @@ import {
     Lightbulb,
     ChevronDown,
     Clock,
+    Scale,
+    X,
+    Cloud,
+    Zap,
+    Shield,
+    Globe,
+    Cpu,
+    Database,
+    Server,
+    HardDrive,
 } from 'lucide-react';
 import { getCostSummary, getCostForecast, getCostRecommendations, getCostServices } from '../api/costAnalysis';
 import type {
@@ -183,6 +194,7 @@ export const CostAnalysis: React.FC = () => {
     const [showCustomRange, setShowCustomRange] = useState(false);
     const [filterService, setFilterService] = useState('');
     const [availableServices, setAvailableServices] = useState<string[]>([]);
+    const [showComparator, setShowComparator] = useState(false);
 
     // Initialize with default preset
     useEffect(() => {
@@ -308,14 +320,23 @@ export const CostAnalysis: React.FC = () => {
                             AWS spending insights, historical costs, and forecasted spend
                         </p>
                     </div>
-                    <button
-                        onClick={fetchData}
-                        disabled={loading}
-                        className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white/[0.04] border border-border/50 text-sm text-muted-foreground hover:text-foreground hover:bg-white/[0.08] transition-all duration-200 disabled:opacity-50 self-start md:self-auto"
-                    >
-                        <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-                        Refresh
-                    </button>
+                    <div className="flex items-center gap-2 self-start md:self-auto">
+                        <button
+                            onClick={() => setShowComparator(true)}
+                            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-r from-primary/10 to-accent/10 border border-primary/30 text-sm text-primary hover:from-primary/20 hover:to-accent/20 transition-all duration-200"
+                        >
+                            <Scale size={14} />
+                            Comparator Agent
+                        </button>
+                        <button
+                            onClick={fetchData}
+                            disabled={loading}
+                            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white/[0.04] border border-border/50 text-sm text-muted-foreground hover:text-foreground hover:bg-white/[0.08] transition-all duration-200 disabled:opacity-50"
+                        >
+                            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+                            Refresh
+                        </button>
+                    </div>
                 </div>
 
                 {/* Date Presets + Controls */}
@@ -797,6 +818,188 @@ export const CostAnalysis: React.FC = () => {
                 <DollarSign size={10} />
                 <span>Data from AWS Cost Explorer API • Costs may take up to 24 hours to reflect</span>
             </div>
+
+            {/* ── Comparator Agent Modal ────────────────────────── */}
+            {showComparator && createPortal(
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in" onClick={() => setShowComparator(false)}>
+                    <div className="glass-card w-full max-w-5xl max-h-[85vh] flex flex-col border border-white/10 shadow-2xl" onClick={e => e.stopPropagation()}>
+                        {/* Header */}
+                        <div className="flex items-center justify-between p-5 border-b border-border/30 shrink-0">
+                            <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary/20 to-accent/20 border border-primary/20 flex items-center justify-center">
+                                    <Scale size={20} className="text-primary" />
+                                </div>
+                                <div>
+                                    <h2 className="text-sm font-bold text-white">Cloud Cost Comparator Agent</h2>
+                                    <p className="text-[11px] text-muted-foreground/60 mt-0.5">Compare costs & performance across AWS, GCP, and Azure</p>
+                                </div>
+                            </div>
+                            <button
+                                onClick={() => setShowComparator(false)}
+                                className="p-2 rounded-lg text-white/30 hover:text-white/70 hover:bg-white/[0.06] transition-all"
+                            >
+                                <X size={16} />
+                            </button>
+                        </div>
+
+                        {/* Content */}
+                        <div className="flex-1 overflow-y-auto p-5 space-y-6">
+                            {/* Cloud Provider Cards */}
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                {[
+                                    { name: 'Amazon Web Services', short: 'AWS', color: 'from-orange-500 to-amber-500', border: 'border-orange-500/20', bg: 'bg-orange-500/5', icon: <Cloud size={20} className="text-orange-400" />, badge: 'Current' },
+                                    { name: 'Google Cloud Platform', short: 'GCP', color: 'from-blue-400 to-green-400', border: 'border-blue-400/20', bg: 'bg-blue-400/5', icon: <Globe size={20} className="text-blue-400" />, badge: null },
+                                    { name: 'Microsoft Azure', short: 'Azure', color: 'from-cyan-500 to-blue-600', border: 'border-cyan-500/20', bg: 'bg-cyan-500/5', icon: <Cloud size={20} className="text-cyan-400" />, badge: null },
+                                ].map((provider) => (
+                                    <div key={provider.short} className={`p-4 rounded-xl ${provider.bg} border ${provider.border} space-y-3`}>
+                                        <div className="flex items-center justify-between">
+                                            <div className="flex items-center gap-2.5">
+                                                <div className={`w-9 h-9 rounded-lg bg-gradient-to-br ${provider.color} bg-opacity-10 flex items-center justify-center`}>
+                                                    {provider.icon}
+                                                </div>
+                                                <div>
+                                                    <p className="text-xs font-bold text-white/90">{provider.short}</p>
+                                                    <p className="text-[10px] text-white/40">{provider.name}</p>
+                                                </div>
+                                            </div>
+                                            {provider.badge && (
+                                                <span className="text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-orange-500/10 text-orange-400 border border-orange-500/20">
+                                                    {provider.badge}
+                                                </span>
+                                            )}
+                                        </div>
+                                        <div className="space-y-2">
+                                            <div className="flex justify-between text-[11px]">
+                                                <span className="text-white/40">Est. Monthly Cost</span>
+                                                <span className="text-white/20 font-mono">--</span>
+                                            </div>
+                                            <div className="flex justify-between text-[11px]">
+                                                <span className="text-white/40">vs Current</span>
+                                                <span className="text-white/20 font-mono">--</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+
+                            {/* Service-Level Comparison Table */}
+                            <div className="rounded-xl border border-white/[0.06] overflow-hidden">
+                                <div className="p-4 border-b border-white/[0.06] flex items-center gap-2">
+                                    <Database size={14} className="text-primary/60" />
+                                    <h3 className="text-xs font-semibold text-white/70 uppercase tracking-wider">Service-Level Cost Comparison</h3>
+                                </div>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-xs">
+                                        <thead>
+                                            <tr className="border-b border-white/[0.06]">
+                                                <th className="text-left py-3 px-4 text-[10px] font-semibold text-white/30 uppercase tracking-wider">Service Type</th>
+                                                <th className="text-center py-3 px-4 text-[10px] font-semibold text-orange-400/60 uppercase tracking-wider">AWS</th>
+                                                <th className="text-center py-3 px-4 text-[10px] font-semibold text-blue-400/60 uppercase tracking-wider">GCP</th>
+                                                <th className="text-center py-3 px-4 text-[10px] font-semibold text-cyan-400/60 uppercase tracking-wider">Azure</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {[
+                                                { service: 'Compute', icon: <Cpu size={13} className="text-white/30" /> },
+                                                { service: 'Database (Relational)', icon: <Database size={13} className="text-white/30" /> },
+                                                { service: 'Object Storage', icon: <HardDrive size={13} className="text-white/30" /> },
+                                                { service: 'Load Balancer', icon: <Server size={13} className="text-white/30" /> },
+                                                { service: 'Serverless Functions', icon: <Zap size={13} className="text-white/30" /> },
+                                                { service: 'CDN', icon: <Globe size={13} className="text-white/30" /> },
+                                                { service: 'Container Orchestration', icon: <Server size={13} className="text-white/30" /> },
+                                                { service: 'Managed Cache', icon: <Database size={13} className="text-white/30" /> },
+                                            ].map((row) => (
+                                                <tr key={row.service} className="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors">
+                                                    <td className="py-2.5 px-4">
+                                                        <div className="flex items-center gap-2">
+                                                            {row.icon}
+                                                            <span className="text-white/60 font-medium">{row.service}</span>
+                                                        </div>
+                                                    </td>
+                                                    <td className="py-2.5 px-4 text-center font-mono text-white/15">--</td>
+                                                    <td className="py-2.5 px-4 text-center font-mono text-white/15">--</td>
+                                                    <td className="py-2.5 px-4 text-center font-mono text-white/15">--</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            {/* Cost vs Performance Analysis */}
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                {/* Cost Efficiency */}
+                                <div className="rounded-xl border border-white/[0.06] p-4 space-y-4">
+                                    <div className="flex items-center gap-2">
+                                        <DollarSign size={14} className="text-emerald-400" />
+                                        <h3 className="text-xs font-semibold text-white/70 uppercase tracking-wider">Cost Efficiency Score</h3>
+                                    </div>
+                                    <div className="space-y-3">
+                                        {[
+                                            { provider: 'AWS', color: 'bg-orange-500' },
+                                            { provider: 'GCP', color: 'bg-blue-400' },
+                                            { provider: 'Azure', color: 'bg-cyan-500' },
+                                        ].map((p) => (
+                                            <div key={p.provider} className="space-y-1.5">
+                                                <div className="flex justify-between text-[11px]">
+                                                    <span className="text-white/50 font-medium">{p.provider}</span>
+                                                    <span className="text-white/20 font-mono">--/100</span>
+                                                </div>
+                                                <div className="w-full h-1.5 rounded-full bg-white/[0.04]">
+                                                    <div className={`h-full rounded-full ${p.color} opacity-15 w-0`} />
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                {/* Performance Rating */}
+                                <div className="rounded-xl border border-white/[0.06] p-4 space-y-4">
+                                    <div className="flex items-center gap-2">
+                                        <Zap size={14} className="text-amber-400" />
+                                        <h3 className="text-xs font-semibold text-white/70 uppercase tracking-wider">Performance Rating</h3>
+                                    </div>
+                                    <div className="space-y-3">
+                                        {[
+                                            { provider: 'AWS', color: 'bg-orange-500', metrics: ['Compute Speed', 'Network Latency', 'IO Throughput'] },
+                                            { provider: 'GCP', color: 'bg-blue-400', metrics: ['Compute Speed', 'Network Latency', 'IO Throughput'] },
+                                            { provider: 'Azure', color: 'bg-cyan-500', metrics: ['Compute Speed', 'Network Latency', 'IO Throughput'] },
+                                        ].map((p) => (
+                                            <div key={p.provider} className="space-y-1.5">
+                                                <div className="flex justify-between text-[11px]">
+                                                    <span className="text-white/50 font-medium">{p.provider}</span>
+                                                    <span className="text-white/20 font-mono">--/100</span>
+                                                </div>
+                                                <div className="w-full h-1.5 rounded-full bg-white/[0.04]">
+                                                    <div className={`h-full rounded-full ${p.color} opacity-15 w-0`} />
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Key Insights Placeholder */}
+                            <div className="rounded-xl border border-white/[0.06] p-4 space-y-3">
+                                <div className="flex items-center gap-2">
+                                    <Lightbulb size={14} className="text-amber-400" />
+                                    <h3 className="text-xs font-semibold text-white/70 uppercase tracking-wider">Key Insights</h3>
+                                </div>
+                                <div className="flex flex-col items-center justify-center py-8 gap-3">
+                                    <div className="w-12 h-12 rounded-xl bg-white/[0.03] border border-white/[0.06] flex items-center justify-center">
+                                        <Shield size={22} className="text-white/10" />
+                                    </div>
+                                    <p className="text-xs text-white/20 text-center max-w-sm">
+                                        Cost comparison data will appear here once your architecture is analyzed across cloud providers.
+                                    </p>
+                                    <span className="text-[10px] text-primary/40 font-medium">Coming Soon</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>,
+                document.body
+            )}
         </div>
     );
 };

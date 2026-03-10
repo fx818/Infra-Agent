@@ -106,6 +106,23 @@
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   }
 
+  /* Dark-themed native select & option */
+  select {
+    color-scheme: dark;
+  }
+  select option {
+    background: hsl(228 15% 13%);
+    color: hsl(210 40% 98%);
+    padding: 6px 8px;
+  }
+  select option:checked {
+    background: hsl(217 91% 60% / 0.25);
+  }
+  /* Date inputs matching dark theme */
+  input[type="date"] {
+    color-scheme: dark;
+  }
+
   .glass-card-hover:hover {
     border-color: hsl(217 91% 60% / 0.4);
     box-shadow: var(--shadow-glow);

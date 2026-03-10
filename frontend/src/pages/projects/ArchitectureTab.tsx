@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { architectureApi } from '../../api/architecture';
 import type { ArchitectureResponse } from '../../types';
-import { Send, FileCode, Cpu, Loader2, Box, Sparkles, Share2, Terminal } from 'lucide-react';
+import { Send, FileCode, Cpu, Loader2, Box, Sparkles, Share2, Terminal, X } from 'lucide-react';
 import { BlueprintGraph } from '../../components/projects/BlueprintGraph';
 import { ErrorPanel } from '../../components/ErrorPanel';
 
@@ -18,6 +19,7 @@ export const ArchitectureTab: React.FC<Props> = ({ projectId }) => {
     const [error, setError] = useState<any>(null);
     const [lastPrompt, setLastPrompt] = useState('');
     const [view, setView] = useState<'graph' | 'code'>('graph');
+    const [showAllResources, setShowAllResources] = useState(false);
 
 
     useEffect(() => {
@@ -265,11 +267,21 @@ export const ArchitectureTab: React.FC<Props> = ({ projectId }) => {
                         <div className="flex flex-col h-full">
                             {/* Resources grid */}
                             <div className="p-4 border-b border-white/[0.06]">
-                                <p className="text-[10px] uppercase tracking-wider text-white/20 font-semibold mb-3">
-                                    Resources ({architecture.graph.nodes.length})
-                                </p>
+                                <div className="flex items-center justify-between mb-3">
+                                    <p className="text-[10px] uppercase tracking-wider text-white/20 font-semibold">
+                                        Resources ({architecture.graph.nodes.length})
+                                    </p>
+                                    {architecture.graph.nodes.length > 8 && (
+                                        <button
+                                            onClick={() => setShowAllResources(true)}
+                                            className="text-[10px] text-primary/70 hover:text-primary font-medium transition-colors"
+                                        >
+                                            Show All
+                                        </button>
+                                    )}
+                                </div>
                                 <div className="flex flex-wrap gap-2">
-                                    {architecture.graph.nodes.map((node) => (
+                                    {architecture.graph.nodes.slice(0, 8).map((node) => (
                                         <div
                                             key={node.id}
                                             className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white/[0.04] border border-white/[0.06] hover:border-white/[0.12] transition-colors group"
@@ -284,8 +296,57 @@ export const ArchitectureTab: React.FC<Props> = ({ projectId }) => {
                                             </span>
                                         </div>
                                     ))}
+                                    {architecture.graph.nodes.length > 8 && (
+                                        <button
+                                            onClick={() => setShowAllResources(true)}
+                                            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-primary/5 border border-primary/20 hover:bg-primary/10 hover:border-primary/30 transition-colors text-[11px] text-primary/80 font-medium"
+                                        >
+                                            +{architecture.graph.nodes.length - 8} more
+                                        </button>
+                                    )}
                                 </div>
                             </div>
+
+                            {/* All Resources Modal */}
+                            {showAllResources && architecture.graph.nodes.length > 0 && createPortal(
+                                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in" onClick={() => setShowAllResources(false)}>
+                                    <div className="glass-card w-full max-w-2xl max-h-[80vh] flex flex-col border border-white/10 shadow-2xl" onClick={e => e.stopPropagation()}>
+                                        <div className="flex items-center justify-between p-4 border-b border-white/[0.06] shrink-0">
+                                            <div className="flex items-center gap-2">
+                                                <Box size={14} className="text-primary/60" />
+                                                <h3 className="text-xs font-semibold text-white/80">All Resources</h3>
+                                                <span className="text-[10px] text-white/30 font-mono">{architecture.graph.nodes.length} total</span>
+                                            </div>
+                                            <button
+                                                onClick={() => setShowAllResources(false)}
+                                                className="p-1.5 rounded-lg text-white/30 hover:text-white/70 hover:bg-white/[0.06] transition-all"
+                                            >
+                                                <X size={14} />
+                                            </button>
+                                        </div>
+                                        <div className="flex-1 overflow-y-auto p-4">
+                                            <div className="flex flex-wrap gap-2">
+                                                {architecture.graph.nodes.map((node) => (
+                                                    <div
+                                                        key={node.id}
+                                                        className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white/[0.04] border border-white/[0.06] hover:border-white/[0.12] transition-colors group"
+                                                    >
+                                                        <div className={`w-2 h-2 rounded-full bg-gradient-to-br ${getServiceColor(node.type)}`} />
+                                                        <span className="text-[11px] font-mono text-blue-300/80 group-hover:text-blue-300 transition-colors">
+                                                            {node.type}
+                                                        </span>
+                                                        <span className="text-white/15">·</span>
+                                                        <span className="text-[11px] text-white/50 group-hover:text-white/70 transition-colors">
+                                                            {node.id}
+                                                        </span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>,
+                                document.body
+                            )}
 
                             {/* Visualization / Code area */}
                             <div className="flex-1 min-h-0 overflow-hidden relative">

@@ -120,8 +120,9 @@ async def update_llm_config(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> LLMConfig:
     """Update the current user's LLM configuration."""
-    # 1. Update preferences (model, base_url)
-    current_prefs = current_user.llm_preferences or {}
+    # 1. Update preferences (model, base_url) — must create a new dict
+    #    so SQLAlchemy detects the JSON column mutation.
+    current_prefs = dict(current_user.llm_preferences or {})
     current_prefs["base_url"] = payload.base_url
     current_prefs["model"] = payload.model
     current_user.llm_preferences = current_prefs
