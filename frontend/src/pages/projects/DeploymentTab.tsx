@@ -231,7 +231,8 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
     const handleDownloadPem = async (keyPairName: string) => {
         try {
             const token = localStorage.getItem('token');
-            const base = (import.meta.env.VITE_API_URL as string | undefined) || 'http://localhost:8000';
+            const base = (import.meta.env.VITE_API_URL as string | undefined) || 'https://arcaiengineer.in';
+            // const base = (import.meta.env.VITE_API_URL as string | undefined) || 'http://localhost:8000';
             const resp = await fetch(`${base}/projects/${projectId}/ec2-key/${keyPairName}/download`, {
                 headers: { Authorization: `Bearer ${token}` },
             });
@@ -267,7 +268,8 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
         try {
             const token = localStorage.getItem('token');
             // const response = await fetch(`${import.meta.env.VITE_API_URL || 'https://3.92.236.1'}/projects/${projectId}/deploy/stream`, {
-            const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/projects/${projectId}/deploy/stream`, {
+            // const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/projects/${projectId}/deploy/stream`, {
+            const response = await fetch(`${import.meta.env.VITE_API_URL || 'https://arcaiengineer.in'}/projects/${projectId}/deploy/stream`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -365,7 +367,8 @@ export const DeploymentTab: React.FC<Props> = ({ projectId, onStatusChange }) =>
 
         try {
             const token = localStorage.getItem('token');
-            const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/projects/${projectId}/redeploy/stream`, {
+            // const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/projects/${projectId}/redeploy/stream`, {
+            const response = await fetch(`${import.meta.env.VITE_API_URL || 'https://arcaiengineer.in'}/projects/${projectId}/redeploy/stream`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
