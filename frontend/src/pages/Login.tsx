@@ -53,7 +53,7 @@ export const Login: React.FC = () => {
 
                     <form onSubmit={handleSubmit} className="space-y-5">
                         <div className="space-y-2">
-                            <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/80">Email</label>
+                            <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/80">Email (Use: admin@mail.com)</label>
                             <div className="relative">
                                 <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground/50" />
                                 <input
@@ -68,7 +68,7 @@ export const Login: React.FC = () => {
                         </div>
 
                         <div className="space-y-2">
-                            <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/80">Password</label>
+                            <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/80">Password (Use: admin123)</label>
                             <div className="relative">
                                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground/50" />
                                 <input
