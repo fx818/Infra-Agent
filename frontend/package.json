@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@types/dagre": "^0.7.53",
+    "@vercel/analytics": "^1.6.1",
     "@xyflow/react": "^12.10.0",
     "axios": "^1.13.5",
     "dagre": "^0.8.5",

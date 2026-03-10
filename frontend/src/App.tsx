@@ -11,7 +11,7 @@ import { ProjectDetail } from './pages/projects/ProjectDetail';
 import { NewProject } from './pages/projects/NewProject';
 import { Deployments } from './pages/Deployments';
 import { Monitoring } from './pages/Monitoring';
-import { CostAnalysis } from './pages/CostAnalysis';
+// import { CostAnalysis } from './pages/CostAnalysis';
 import { Settings } from './pages/Settings';
 import { LogsPage } from './pages/Logs';
 import { DragBuild } from './pages/DragBuild';
